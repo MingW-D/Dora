@@ -1,0 +1,52 @@
+[package]
+name = "taurifront"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "taurifront_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.5.1", features = [ "macos-private-api",
+    "tray-icon",
+    "image-png",
+    "rustls-tls"
+] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+tauri-plugin-fs = "2"
+tauri-plugin-http = "2"
+
+[target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
+tauri-plugin-autostart = "2.3.0"
+lazy_static = "1.4"
+screenshots = "0.5.4"
+base64 = "0.22.1"
+rodio = "0.17.3"
+reqwest = { version = "0.11", features = [
+    "json",
+    "socks",
+    "rustls-tls",
+    "blocking",
+] }
+surge-ping = "0.8.0"
+rand = "0.8.5"
+
+[target."cfg(target_os = \"macos\")".dependencies]
+cocoa = "0.26.0"
+objc = "0.2.7"
+
+
