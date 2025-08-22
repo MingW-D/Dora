@@ -12,6 +12,8 @@ import MarkdownRenderer from './components/MarkdownRenderer.vue';
 import MCPToolsManager from './components/MCPToolsManager.vue';
 import { parseMessage, isCodeBlock, isMarkdownBlock } from './utils/messageParser';
 import { initWindowControls } from './services/windowControl';
+import cacheManager from './services/cacheManager';
+import LogPanel from './components/LogPanel.vue';
 // 设置 store
 const settingsStore = useSettingsStore();
 const modelStore = useModelStore();
@@ -101,101 +103,57 @@ function openMcpManager() {
 
 // 创建新对话
 async function createNewChat() {
-  // 保存当前对话到缓存
-  if (currentChatId.value && currentMessages.value.length > 0) {
-    conversationCache.value.set(currentChatId.value, [...currentMessages.value]);
-  }
-  
-  const id = uuidv4();
-  const now = Date.now();
-  
-  // 如果当前有对话，保存到数据库
-  if (currentMessages.value.length > 0) {
-    try {
-      await databaseService.createConversation({
-        id: currentChatId.value,
-        title: currentMessages.value[0].content.length > 20 
-          ? currentMessages.value[0].content.substring(0, 20) + '...'
-          : currentMessages.value[0].content
-      });
-
-      // 保存所有消息
-      for (const message of currentMessages.value) {
-        await databaseService.addMessage({
-          id: message.id,
-          conversation_id: currentChatId.value,
-          role: message.role,
-          content: message.content,
-          timestamp: message.timestamp
-        });
-      }
-
-      // 添加到历史列表
-      chatList.value.unshift({
-        id: currentChatId.value,
-        title: currentMessages.value[0].content.length > 20 
-          ? currentMessages.value[0].content.substring(0, 20) + '...'
-          : currentMessages.value[0].content,
-        created_at: currentMessages.value[0].timestamp,
-        updated_at: currentMessages.value[currentMessages.value.length - 1].timestamp
-      });
-    } catch (error) {
-      console.error('保存对话失败:', error);
-    }
-  }
-
-  // 立即在数据库中创建新对话
+  // 切换前，确保未保存的数据落库
   try {
-    await databaseService.createConversation({
-      id: id,
-      title: '新对话'
-    });
-    
-    // 添加到历史列表
-    chatList.value.unshift({
-      id: id,
-      title: '新对话',
-      created_at: now,
-      updated_at: now
-    });
-  } catch (error) {
-    console.error('创建新对话失败:', error);
+    await cacheManager.forceSyncAll();
+  } catch (e) {
+    console.warn('切换前强制同步失败，将继续创建新对话:', e);
   }
 
-  // 开始新对话
-  currentChatId.value = id;
+  // 使用缓存管理器创建对话（内部会创建数据库记录）
+  const conv = await cacheManager.createConversation('新对话');
+
+  // 更新历史列表（用 cache 元数据）
+  chatList.value.unshift({
+    id: conv.id,
+    title: conv.metadata.title,
+    created_at: conv.metadata.createdAt,
+    updated_at: conv.metadata.updatedAt
+  });
+
+  // 切换到新对话
+  currentChatId.value = conv.id;
   currentMessages.value = [];
-  // 初始化新对话的缓存
-  conversationCache.value.set(id, []);
+  // 同步 UI 层的本地缓存
+  conversationCache.value.set(conv.id, []);
   currentView.value = 'chat';
 }
 
 // 选择对话
 async function selectChat(id: string) {
   try {
-    // 检查是否需要保存当前对话到缓存
+    // 切换前缓存当前对话的 UI 数据
     if (currentChatId.value && currentMessages.value.length > 0) {
       conversationCache.value.set(currentChatId.value, [...currentMessages.value]);
     }
-    
-    // 设置新的当前对话ID
+
     currentChatId.value = id;
     currentView.value = 'chat';
-    
-    // 优先从缓存加载
-    if (conversationCache.value.has(id)) {
-      currentMessages.value = [...conversationCache.value.get(id)!];
-      console.log('从缓存加载对话:', id);
+
+    // 使用缓存管理器读取会话（命中缓存或回源数据库）
+    const cachedConv = await cacheManager.getConversation(id);
+    if (cachedConv) {
+      currentMessages.value = [...cachedConv.messages];
+      conversationCache.value.set(id, [...cachedConv.messages]);
+      console.log('通过 cacheManager 加载对话:', id);
     } else {
-      // 从数据库加载
+      // 兜底：保持原逻辑（通常不会走到这里）
       const messages = await databaseService.getMessages(id);
       currentMessages.value = messages;
-      // 同时更新缓存
       conversationCache.value.set(id, [...messages]);
-      console.log('从数据库加载对话:', id);
+      console.log('从数据库兜底加载对话:', id);
     }
-    
-    // 加载完消息后，滚动到底部
+
     scrollToBottom();
   } catch (error) {
     console.error('加载对话消息失败:', error);
@@ -207,13 +165,13 @@ async function deleteChat(id: string, event: Event) {
   event.stopPropagation();
   
   try {
-    // 从数据库删除
-    await databaseService.deleteConversation(id);
+    // 通过缓存管理器删除（内部会删除数据库记录）
+    await cacheManager.deleteConversation(id);
     
     // 更新本地状态
     chatList.value = chatList.value.filter(chat => chat.id !== id);
     
-    // 从缓存中移除
+    // 从本地 UI 缓存中移除
     conversationCache.value.delete(id);
     
     // 如果删除的是当前选中的对话，则重置或选择另一个对话
@@ -233,6 +191,11 @@ async function deleteChat(id: string, event: Event) {
 // 打开设置对话框
 function openSettings() {
   settingsStore.openSettings();
+}
+
+// 新增：打开/关闭日志面板
+function openLogs() {
+  settingsStore.toggleLogPanel();
 }
 
 // 获取用于记忆的历史消息（带窗口）
@@ -270,7 +233,7 @@ async function sendMessage() {
   // 添加用户消息到界面
   currentMessages.value.push(userMessage);
   
-  // 也更新缓存
+  // 同步 UI 层的本地缓存
   if (conversationCache.value.has(currentChatId.value)) {
     conversationCache.value.get(currentChatId.value)!.push(userMessage);
   } else {
@@ -280,23 +243,25 @@ async function sendMessage() {
   // 滚动到底部
   scrollToBottom();
   
-  // 如果发送了第一条消息，更新对话标题
+  // 如果发送了第一条消息，更新对话标题（改为走 cacheManager）
   const conversation = chatList.value.find(chat => chat.id === currentChatId.value);
   if (conversation && conversation.title === '新对话') {
-    // 更新对话标题为用户消息内容
     const newTitle = userMessage.content.length > 20 
       ? userMessage.content.substring(0, 20) + '...'
       : userMessage.content;
-    
-    await databaseService.updateConversation(currentChatId.value, newTitle);
-    
+
+    // 使用缓存管理器更新元数据（由异步同步器落库）
+    cacheManager.updateConversation(currentChatId.value, {
+      metadata: { title: newTitle }
+    });
+
     // 更新本地对话列表
     conversation.title = newTitle;
     conversation.updated_at = Date.now();
   }
   
-  // 保存用户消息到数据库
-  await databaseService.addMessage(userMessage);
+  // 使用缓存管理器添加用户消息（由异步同步器落库）
+  await cacheManager.addMessage(currentChatId.value, userMessage);
   
   const question = userInput.value;
   userInput.value = '';
@@ -314,16 +279,21 @@ async function sendMessage() {
   // 添加空的AI消息到界面
   currentMessages.value.push(aiMessage);
   
-  // 更新缓存
+  // 更新本地缓存
   if (conversationCache.value.has(currentChatId.value)) {
     conversationCache.value.get(currentChatId.value)!.push(aiMessage);
   }
+
+  // 通过缓存管理器登记 AI 消息（先插入空内容，后续流式更新）
+  await cacheManager.addMessage(currentChatId.value, aiMessage);
   
   // 当前会话的ID，保存起来以便在异步操作中使用
   const currentConversationId = currentChatId.value;
   
   // 开始生成，显示加载动画
   generatingChats.value.set(currentConversationId, true);
+  // 同步到缓存管理器（用于 LRU 保活）
+  cacheManager.setGeneratingStatus(currentConversationId, true);
   
   // 生成AI回复
   try {
@@ -369,10 +339,12 @@ async function sendMessage() {
       
       // 结束生成状态
       generatingChats.value.set(currentConversationId, false);
+      cacheManager.setGeneratingStatus(currentConversationId, false);
     });
   } catch (error) {
     console.error('初始化AI请求失败:', error);
     generatingChats.value.set(currentConversationId, false);
+    cacheManager.setGeneratingStatus(currentConversationId, false);
     
     // 更新消息为错误状态
     updateMessageInConversation(
@@ -391,6 +363,7 @@ async function generateAIResponse(
   conversationId: string,
   abortSignal: AbortSignal
 ): Promise<string> {
+  // ... existing code ...
   try {
     // 构造messages数组，格式为OpenAI风格
     const messagesForModel = memoryMessages.map(msg => ({
@@ -422,32 +395,27 @@ async function generateAIResponse(
         stream: true,
         mcp_config: mcpStore.mcpConfig.mcpServers
       }),
-      signal: abortSignal // 使用AbortSignal来支持取消
+      signal: abortSignal
     });
-    
+
     if (!response.ok) {
       throw new Error(`API responded with status: ${response.status}`);
     }
-    
+
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
-    
-    // 创建一个Promise，当流结束时解析
+
     return new Promise((resolve, reject) => {
-      // 保存完整的响应
       let fullResponse = '';
       let hasReceivedContent = false;
-      
+
       async function readStream() {
         try {
           const { done, value } = await reader.read();
-          
+
           if (done) {
-            // 如果流结束且有内容，确保完整内容被保存
             if (hasReceivedContent && fullResponse) {
-              // 确保最终的完整回复被写入数据库
               try {
-                // 使用缓存机制更新消息内容
                 await updateMessageInConversation(conversationId, aiMessageId, fullResponse, true);
                 console.log('流结束，完整回复已保存到数据库', fullResponse.length, 'chars');
               } catch (e) {
@@ -459,20 +427,16 @@ async function generateAIResponse(
             }
             return;
           }
-          
-          // 解码并处理当前数据块
+
           const chunk = decoder.decode(value, { stream: true });
           const lines = chunk.split('\n').filter(line => line.trim() !== '');
-          
-          // 处理每一行
+
           for (const line of lines) {
             if (line.startsWith('data:')) {
               try {
                 const eventData = line.slice(5).trim();
                 if (eventData === '[DONE]') {
-                  // 流正常结束，确保完整内容被保存
                   if (hasReceivedContent && fullResponse) {
-                    // 使用缓存机制更新消息内容，强制写入数据库
                     await updateMessageInConversation(conversationId, aiMessageId, fullResponse, true);
                     console.log('收到[DONE]，完整回复已保存到数据库', fullResponse.length, 'chars');
                     resolve(fullResponse);
@@ -481,45 +445,36 @@ async function generateAIResponse(
                   }
                   return;
                 }
-                
+
                 const data = JSON.parse(eventData);
-                
+
                 if (data.error) {
                   console.error('流式输出错误:', data.error);
                   reject(new Error(data.error));
                   return;
                 }
-                
+
                 if (data.content) {
-                  // 标记已收到内容
                   hasReceivedContent = true;
-                  // 更新当前显示的消息
                   fullResponse += data.content;
-                  
-                  // 实时更新消息内容，不等待流完成
-                  // 不每次都写入数据库，仅更新缓存和UI
+
                   await updateMessageInConversation(conversationId, aiMessageId, fullResponse, false);
-                  
-                  // 收到第一次内容后，取消加载动画
+
                   if (generatingChats.value.get(conversationId)) {
                     generatingChats.value.set(conversationId, false);
+                    cacheManager.setGeneratingStatus(conversationId, false);
                   }
                 }
               } catch (e) {
                 console.error('解析消息失败:', e);
-                // 不要在解析单条消息失败时中断整个流程
-                // 继续处理下一条
               }
             }
           }
-          
-          // 继续读取流
+
           readStream();
         } catch (error: any) {
-          // 检查是否是用户取消的请求
           if (error.name === 'AbortError') {
             console.log('用户取消了请求');
-            // 确保已生成的内容被保存
             if (hasReceivedContent && fullResponse) {
               await updateMessageInConversation(conversationId, aiMessageId, fullResponse, true);
               console.log('请求被取消，但已保存部分回复', fullResponse.length, 'chars');
@@ -527,11 +482,9 @@ async function generateAIResponse(
             reject(error);
             return;
           }
-          
+
           console.error('读取流失败:', error);
-          // 如果已经有响应内容，则使用已有内容而不是报错
           if (hasReceivedContent && fullResponse) {
-            // 确保在出错情况下也保存已生成内容
             await updateMessageInConversation(conversationId, aiMessageId, fullResponse, true);
             console.log('读取流失败，但已保存部分回复', fullResponse.length, 'chars');
             resolve(fullResponse);
@@ -540,13 +493,14 @@ async function generateAIResponse(
           }
         }
       }
-      
+
       readStream();
     });
   } catch (error) {
     console.error('调用AI API失败:', error);
-    throw error; // 重新抛出错误，让上层处理
+    throw error;
   }
+  // ... existing code ...
 }
 
 // 更新指定会话中的消息
@@ -563,13 +517,11 @@ async function updateMessageInConversation(
       if (messageIndex !== -1) {
         currentMessages.value[messageIndex].content = content;
         currentMessages.value[messageIndex].timestamp = Date.now();
-        
-        // 滚动到底部
         scrollToBottom();
       }
     }
-    
-    // 更新缓存
+
+    // 更新本地 UI 缓存
     if (conversationCache.value.has(conversationId)) {
       const cachedMessages = conversationCache.value.get(conversationId)!;
       const messageIndex = cachedMessages.findIndex(msg => msg.id === messageId);
@@ -577,7 +529,6 @@ async function updateMessageInConversation(
         cachedMessages[messageIndex].content = content;
         cachedMessages[messageIndex].timestamp = Date.now();
       } else {
-        // 如果在缓存中找不到该消息（极少发生），则添加它
         cachedMessages.push({
           id: messageId,
           conversation_id: conversationId,
@@ -587,18 +538,14 @@ async function updateMessageInConversation(
         });
       }
     }
-    
-    // 仅在强制更新或间隔写入时更新数据库
-    // 这样可以减少数据库写入次数，提高性能
+
+    // 使用缓存管理器更新消息（标记为脏数据，稍后批量同步）
+    cacheManager.updateMessage(conversationId, messageId, content);
+
+    // 仅在需要时强制立即同步（例如流结束时）
     if (forceDbUpdate) {
-      await databaseService.addMessage({
-        id: messageId,
-        conversation_id: conversationId,
-        role: 'assistant',
-        content: content,
-        timestamp: Date.now()
-      });
-      console.log('已将消息写入数据库:', messageId.substring(0, 6), 'length:', content.length);
+      await cacheManager.forceSyncAll();
+      console.log('已将消息通过 cacheManager 同步到数据库:', messageId.substring(0, 6), 'length:', content.length);
     }
   } catch (error) {
     console.error('更新消息失败:', error);
@@ -622,16 +569,16 @@ function formatTime(timestamp: number): string {
 async function initDatabase() {
   try {
     isLoading.value = true;
-    await databaseService.init();
+    // 使用 cacheManager 初始化（内部会确保数据库初始化）
+    await cacheManager.init();
+
+    // 列表仍使用数据库读取，保持原有排序与展示逻辑
     chatList.value = await databaseService.getConversations();
-    
+
     // 如果有对话，选择第一个
     if (chatList.value.length > 0) {
       await selectChat(chatList.value[0].id);
     }
-    
-    // 加载设置
-    await settingsStore.loadSettings();
   } catch (error) {
     console.error('初始化数据库失败:', error);
   } finally {
@@ -644,6 +591,8 @@ onMounted(() => {
   initDatabase();
   modelStore.loadModelConfigs();
   mcpStore.loadMcpConfigs();
+  // 新增：加载设置（包含开发者模式），并在开启时初始化日志拦截
+  settingsStore.loadSettings();
   
   // 初始化窗口控制
   initWindowControls();
@@ -699,8 +648,19 @@ async function saveAndResendMessage() {
 <template>
   <!-- 简化的标题栏 -->
   <div class="titlebar">
-    <div class="app-logo">PolyAI</div>
+    <div class="app-logo">DoraAI</div>
     <div class="titlebar-controls">
+      <!-- 新增：开发者日志按钮（开发者模式开启时显示） -->
+      <button 
+        v-if="settingsStore.settings.developerMode" 
+        class="window-control logs" 
+        @click="openLogs"
+        title="开发者日志"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24">
+          <path d="M3 5h18v14H3V5zm2 2v10h14V7H5zm2 2h6v2H7V9zm0 4h10v2H7v-2z" fill="currentColor"/>
+        </svg>
+      </button>
       <button class="window-control settings" @click="openSettings">
         <svg width="14" height="14" viewBox="0 0 24 24">
           <path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z" fill="black" />
@@ -913,6 +873,9 @@ async function saveAndResendMessage() {
     
     <!-- 模型配置对话框 -->
     <ModelDialog />
+
+    <!-- 新增：开发者日志面板 -->
+    <LogPanel />
   </div>
 </template>
 
@@ -1683,5 +1646,13 @@ async function saveAndResendMessage() {
 
 .mcp-tool-btn .icon {
   font-size: 16px;
+}
+
+/* 可选：日志按钮高亮 */
+.window-control.logs {
+  background-color: rgba(99, 102, 241, 0.12);
+}
+.window-control.logs:hover {
+  background-color: rgba(99, 102, 241, 0.2);
 }
 </style>
