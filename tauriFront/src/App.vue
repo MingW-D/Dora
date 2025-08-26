@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, nextTick } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import databaseService, { type Conversation, type Message } from './services/database';
 import { v4 as uuidv4 } from 'uuid';
 import { useSettingsStore } from './stores/settingsStore';
@@ -7,13 +7,20 @@ import { useModelStore } from './stores/modelStore';
 import { useMcpStore } from './stores/mcpStore';
 import SettingsDialog from './components/SettingsDialog.vue';
 import ModelDialog from './components/ModelDialog.vue';
+import ModelSelector from './components/ModelSelector.vue';
 import CodeBlock from './components/CodeBlock.vue';
 import MarkdownRenderer from './components/MarkdownRenderer.vue';
 import MCPToolsManager from './components/MCPToolsManager.vue';
+import StudioPane from './components/StudioPane.vue';
+import { studioBus, type StudioAction } from './services/studioBus';
 import { parseMessage, isCodeBlock, isMarkdownBlock } from './utils/messageParser';
 import { initWindowControls } from './services/windowControl';
-import cacheManager from './services/cacheManager';
+import cacheManager, { type MessageContentBlock } from './services/cacheManager';
 import LogPanel from './components/LogPanel.vue';
+import TaskModeSelector, { type TaskMode } from './components/TaskModeSelector.vue';
+import { multiAgentService } from './services/multiAgentService';
+import { removeFilterPatterns } from './apps/utils/filter-stream';
+import { tokenCounter, type TokenStats, type TokenUsage } from './apps/utils/token-counter';
 // 设置 store
 const settingsStore = useSettingsStore();
 const modelStore = useModelStore();
@@ -51,20 +58,78 @@ const memoryWindowSize = ref(10); // 例如10轮记忆
 const isGenerating = ref(false);
 // 将isGenerating改为Map，以对话ID为键
 const generatingChats = ref(new Map<string, boolean>());
+const isCurrentGenerating = computed(() => !!generatingChats.value.get(currentChatId.value));
 // 添加请求控制器集合，用于管理每个会话的请求
 const requestControllers = ref(new Map<string, AbortController>());
 // 添加对话内容缓存，防止切换丢失
 const conversationCache = ref(new Map<string, Message[]>());
 
+// Token usage tracking
+const perMessageUsage = ref<Record<string, { prompt_tokens: number; completion_tokens: number; total_tokens: number; estimated?: boolean }>>({});
+const tokenStats = ref<TokenStats>(tokenCounter.getStats());
+const currentConversationTokenTotal = computed(() => {
+  let sum = 0;
+  for (const msg of currentMessages.value) {
+    const u = perMessageUsage.value[msg.id];
+    if (u) {
+      sum += u.total_tokens || 0;
+    }
+  }
+  return sum;
+});
+
+// 按消息计算“截至该条”的累计总 tokens
+function getCumulativeTotalForMessage(messageId: string): number {
+  let sum = 0;
+  for (const m of currentMessages.value) {
+    const u = perMessageUsage.value[m.id];
+    if (u) sum += u.total_tokens || 0;
+    if (m.id === messageId) break;
+  }
+  return sum;
+}
+
 // 添加编辑消息相关的状态
 const editingMessageId = ref<string | null>(null);
 const editingContent = ref('');
 
+// 任务处理模式
+const taskMode = ref<TaskMode>('auto'); // 'agent' | 'ask' | 'auto'
+
+// Studio dock collapsed state
+const isStudioCollapsed = ref(true);
+let studioSubscription: { unsubscribe: () => void } | null = null;
+function toggleStudio() {
+  isStudioCollapsed.value = !isStudioCollapsed.value;
+}
+
+// Scroll-to-bottom behavior for messages
+const isAtBottom = ref(true);       // 当前是否在底部附近
+const isFollowing = ref(true);      // 是否自动跟随底部
+const scrollDetectionThreshold = 60; // px，判定“接近底部”的阈值
+
+function handleMessagesScroll() {
+  const el = messagesContainer.value;
+  if (!el) return;
+  const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - scrollDetectionThreshold;
+  isAtBottom.value = nearBottom;
+  // 用户向上滚动，关闭自动跟随；滚回底部则重新开启
+  isFollowing.value = nearBottom;
+}
+
+function jumpToBottom() {
+  isFollowing.value = true;
+  scrollToBottom(true);
+}
+
 // 自动滚动到消息底部
-function scrollToBottom() {
+function scrollToBottom(force: boolean = false) {
   nextTick(() => {
-    if (messagesContainer.value) {
-      messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+    const el = messagesContainer.value;
+    if (!el) return;
+    if (force || isFollowing.value) {
+      el.scrollTop = el.scrollHeight;
+      isAtBottom.value = true;
     }
   });
 }
@@ -101,6 +166,19 @@ function openMcpManager() {
   currentView.value = 'mcp';
 }
 
+// 手动停止当前会话的生成
+function stopGeneration() {
+  const id = currentChatId.value;
+  if (!id) return;
+  const controller = requestControllers.value.get(id);
+  if (controller) {
+    try { controller.abort(); } catch {}
+    requestControllers.value.delete(id);
+  }
+  generatingChats.value.set(id, false);
+  cacheManager.setGeneratingStatus(id, false);
+}
+
 // 创建新对话
 async function createNewChat() {
   // 切换前，确保未保存的数据落库
@@ -112,6 +190,8 @@ async function createNewChat() {
 
   // 使用缓存管理器创建对话（内部会创建数据库记录）
   const conv = await cacheManager.createConversation('新对话');
+  // 重置会话 token 统计（使用全局 tokenCounter）
+  try { tokenCounter.resetCurrentSession(); } catch {}
 
   // 更新历史列表（用 cache 元数据）
   chatList.value.unshift({
@@ -220,6 +300,10 @@ function getMemoryMessages(): Message[] {
 
 // 发送消息
 async function sendMessage() {
+  if (isCurrentGenerating.value) {
+    // 阻止在生成中再次发送
+    return;
+  }
   if (!userInput.value.trim()) return;
 
   const userMessage = {
@@ -286,6 +370,18 @@ async function sendMessage() {
 
   // 通过缓存管理器登记 AI 消息（先插入空内容，后续流式更新）
   await cacheManager.addMessage(currentChatId.value, aiMessage);
+
+  // 初始化本轮的 prompt token 估算（在流开始前立即显示）
+  try {
+    const mem = getMemoryMessages();
+    const promptEstimate = estimatePromptTokens(mem);
+    perMessageUsage.value[aiMessageId] = {
+      prompt_tokens: promptEstimate,
+      completion_tokens: 0,
+      total_tokens: promptEstimate,
+      estimated: true,
+    };
+  } catch {}
   
   // 当前会话的ID，保存起来以便在异步操作中使用
   const currentConversationId = currentChatId.value;
@@ -359,148 +455,98 @@ async function sendMessage() {
 async function generateAIResponse(
   question: string,
   aiMessageId: string,
-  memoryMessages: Message[],
+  _memoryMessages: Message[],
   conversationId: string,
   abortSignal: AbortSignal
 ): Promise<string> {
-  // ... existing code ...
   try {
-    // 构造messages数组，格式为OpenAI风格
-    const messagesForModel = memoryMessages.map(msg => ({
-      role: msg.role,
-      content: msg.content
-    }));
+    let fullResponse = '';
+    let hasReceivedContent = false;
 
-    // 获取当前模型配置
-    const currentModel = modelStore.currentModel;
-    if (!currentModel) {
-      throw new Error('未选择模型或模型配置不存在');
-    }
+    // 准备内容块（流式累积到一个 text 块中）
+    let blocks: MessageContentBlock[] = [{ type: 'text', content: '' }];
 
-    // 使用POST请求发送数据并接收流式响应
-    const response = await fetch('http://localhost:8000/generate/stream', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream'
-      },
-      body: JSON.stringify({
-        model_name: currentModel.model_name,
-        url: currentModel.api_url,
-        key: currentModel.api_key || '',
-        messages: messagesForModel,
-        maxTokens: currentModel.max_tokens,
-        temperature: currentModel.temperature,
-        prompt_template: currentModel.prompt_template,
-        stream: true,
-        mcp_config: mcpStore.mcpConfig.mcpServers
-      }),
-      signal: abortSignal
-    });
+    // 监听取消：转发到多智能体服务
+    const onAbort = () => {
+      try { multiAgentService.cancelTask(conversationId); } catch {}
+    };
+    abortSignal.addEventListener('abort', onAbort, { once: true });
 
-    if (!response.ok) {
-      throw new Error(`API responded with status: ${response.status}`);
-    }
+    try {
+      const response = await multiAgentService.processWithMultiAgent(
+        conversationId,
+        question,
+        aiMessageId,
+        (progress) => {
+          if (abortSignal.aborted) return;
+          const incoming = progress.content || '';
+          if (!incoming) return;
 
-    const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
+          hasReceivedContent = true;
 
-    return new Promise((resolve, reject) => {
-      let fullResponse = '';
-      let hasReceivedContent = false;
+          // 过滤系统标记与��见重复片段
+          const nextChunk = removeFilterPatterns(incoming);
 
-      async function readStream() {
-        try {
-          const { done, value } = await reader.read();
-
-          if (done) {
-            if (hasReceivedContent && fullResponse) {
-              try {
-                await updateMessageInConversation(conversationId, aiMessageId, fullResponse, true);
-                console.log('流结束，完整回复已保存到数据库', fullResponse.length, 'chars');
-              } catch (e) {
-                console.error('保存完整回复到数据库失败:', e);
-              }
-              resolve(fullResponse);
-            } else {
-              reject(new Error('未收到有效响应'));
-            }
-            return;
-          }
-
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n').filter(line => line.trim() !== '');
-
-          for (const line of lines) {
-            if (line.startsWith('data:')) {
-              try {
-                const eventData = line.slice(5).trim();
-                if (eventData === '[DONE]') {
-                  if (hasReceivedContent && fullResponse) {
-                    await updateMessageInConversation(conversationId, aiMessageId, fullResponse, true);
-                    console.log('收到[DONE]，完整回复已保存到数据库', fullResponse.length, 'chars');
-                    resolve(fullResponse);
-                  } else {
-                    reject(new Error('未收到有效响应'));
-                  }
-                  return;
-                }
-
-                const data = JSON.parse(eventData);
-
-                if (data.error) {
-                  console.error('流式输出错误:', data.error);
-                  reject(new Error(data.error));
-                  return;
-                }
-
-                if (data.content) {
-                  hasReceivedContent = true;
-                  fullResponse += data.content;
-
-                  await updateMessageInConversation(conversationId, aiMessageId, fullResponse, false);
-
-                  if (generatingChats.value.get(conversationId)) {
-                    generatingChats.value.set(conversationId, false);
-                    cacheManager.setGeneratingStatus(conversationId, false);
-                  }
-                }
-              } catch (e) {
-                console.error('解析消息失败:', e);
-              }
-            }
-          }
-
-          readStream();
-        } catch (error: any) {
-          if (error.name === 'AbortError') {
-            console.log('用户取消了请求');
-            if (hasReceivedContent && fullResponse) {
-              await updateMessageInConversation(conversationId, aiMessageId, fullResponse, true);
-              console.log('请求被取消，但已保存部分回复', fullResponse.length, 'chars');
-            }
-            reject(error);
-            return;
-          }
-
-          console.error('读取流失败:', error);
-          if (hasReceivedContent && fullResponse) {
-            await updateMessageInConversation(conversationId, aiMessageId, fullResponse, true);
-            console.log('读取流失败，但已保存部分回复', fullResponse.length, 'chars');
-            resolve(fullResponse);
+          // 自适应合并：兼容累计/增量/重叠场景，避免重复
+          if (!fullResponse) {
+            fullResponse = nextChunk;
+          } else if (nextChunk === fullResponse) {
+            // 完全重复，忽略
+          } else if (nextChunk.startsWith(fullResponse)) {
+            // 累计模式：直接替换为最新完整内容
+            fullResponse = nextChunk;
+          } else if (fullResponse.includes(nextChunk)) {
+            // 新内容已包含在已有文本中，忽略
           } else {
-            reject(new Error('读取流失败'));
+            // 处理重叠追加：仅拼接新增差异部分
+            let overlap = 0;
+            const maxOverlap = Math.min(fullResponse.length, nextChunk.length);
+            for (let k = maxOverlap; k > 0; k--) {
+              if (fullResponse.endsWith(nextChunk.slice(0, k))) {
+                overlap = k;
+                break;
+              }
+            }
+            fullResponse = fullResponse + nextChunk.slice(overlap);
+          }
+
+          // 更新内容块与消息缓存
+          blocks[0].content = fullResponse;
+          cacheManager.updateContentBlocks(conversationId, aiMessageId, blocks);
+          // 刷新UI但不强制落库
+          updateMessageInConversation(conversationId, aiMessageId, fullResponse, false);
+
+          if (generatingChats.value.get(conversationId)) {
+            generatingChats.value.set(conversationId, true);
+            cacheManager.setGeneratingStatus(conversationId, true);
           }
         }
+      );
+
+      if (abortSignal.aborted) return '';
+
+      if (response.hasError) {
+        throw new Error(response.errorMessage || '任务处理失败');
       }
 
-      readStream();
-    });
-  } catch (error) {
-    console.error('调用AI API失败:', error);
+      const finalContentRaw = response.content || fullResponse;
+      const finalContent = removeFilterPatterns(finalContentRaw);
+      if (finalContent) {
+        await updateMessageInConversation(conversationId, aiMessageId, finalContent, true);
+      }
+      await cacheManager.forceSyncAll();
+      return finalContent;
+    } finally {
+      abortSignal.removeEventListener('abort', onAbort);
+    }
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      // 订阅在取消时通常会自行结束，这里返回空字符串以保持调用方逻辑
+      return '';
+    }
+    console.error('多智能体订阅失败:', error);
     throw error;
   }
-  // ... existing code ...
 }
 
 // 更新指定会话中的消息
@@ -517,6 +563,10 @@ async function updateMessageInConversation(
       if (messageIndex !== -1) {
         currentMessages.value[messageIndex].content = content;
         currentMessages.value[messageIndex].timestamp = Date.now();
+        // 实时估算当前助手消息的token（最终以事件上报为准）
+        if (currentMessages.value[messageIndex].role === 'assistant') {
+          updateEstimatedUsage(conversationId, messageId, content);
+        }
         scrollToBottom();
       }
     }
@@ -596,11 +646,51 @@ onMounted(() => {
   
   // 初始化窗口控制
   initWindowControls();
+
+  // 监听来自 Agent 的 token 使用事件
+  try {
+    window.addEventListener('agent-token-usage', tokenUsageListener as EventListener);
+    tokenCounter.addListener(handleTokenStatsUpdate);
+  } catch {}
+
+  // Subscribe to Studio events to auto-expand dock on new content
+  try {
+    studioSubscription = studioBus.subscribe({
+      next(action: StudioAction) {
+        if (!action) return;
+        if (action.type === 'visibility') {
+          // ignore generic visibility in dock mode
+          return;
+        }
+        if (action.type === 'browserVisible') {
+          if (action.payload?.visible) {
+            isStudioCollapsed.value = false;
+          }
+          return;
+        }
+        // Any content event opens the dock
+        isStudioCollapsed.value = false;
+      },
+    });
+  } catch {}
 });
 
 // 监听消息列表变化，滚动到底部
 watch(() => currentMessages.value.length, () => {
   scrollToBottom();
+});
+
+onUnmounted(() => {
+  try { 
+    window.removeEventListener('agent-token-usage', tokenUsageListener as EventListener); 
+    tokenCounter.removeListener(handleTokenStatsUpdate);
+  } catch {}
+  try {
+    if (studioSubscription) {
+      studioSubscription.unsubscribe();
+      studioSubscription = null;
+    }
+  } catch {}
 });
 
 // 复制消息内容
@@ -612,6 +702,151 @@ async function copyMessageContent(content: string) {
     console.error('复制失败:', error);
   }
 }
+
+// 使用内容块渲染与复制的辅助
+const cachedContentBlocks = computed(() => {
+  const conv = cacheManager.getCachedConversations().find(c => c.id === currentChatId.value);
+  return conv?.contentBlocks;
+});
+
+function getBlocksForMessage(message: Message): MessageContentBlock[] {
+  const map = cachedContentBlocks.value;
+  if (map && map.has(message.id)) {
+    return map.get(message.id)!;
+  }
+  try {
+    const data = JSON.parse(message.content);
+    if (Array.isArray(data)) {
+      return data as MessageContentBlock[];
+    }
+  } catch (e) {
+    // ignore
+  }
+  return [{
+    type: 'text',
+    content: message.content,
+    timestamp: message.timestamp
+  }];
+}
+
+async function copyMessage(message: Message) {
+  try {
+    const blocks = getBlocksForMessage(message);
+    const plain = blocks.map((b) => {
+      switch (b.type) {
+        case 'text':
+          return String((b as any).content || '');
+        case 'tool_call':
+          return `[工具调用] ${String((b as any).content || '')}`;
+        case 'tool_message':
+          return `[工具消息]\n` + (typeof (b as any).content === 'string' ? (b as any).content : JSON.stringify((b as any).content, null, 2));
+        case 'url_links':
+          return (Array.isArray((b as any).content) ? (b as any).content : []).join('\n');
+        case 'plan_steps':
+          return Array.isArray((b as any).content)
+            ? (b as any).content.map((s: any, i: number) => `${i + 1}. ${s}`).join('\n')
+            : String((b as any).content || '');
+        case 'step_result':
+          return typeof (b as any).content === 'string'
+            ? (b as any).content
+            : JSON.stringify((b as any).content, null, 2);
+        default:
+          return String((b as any).content || '');
+      }
+    }).join('\n');
+
+    await navigator.clipboard.writeText(plain);
+  } catch (error) {
+    console.error('复制失败:', error);
+  }
+}
+
+// Token usage helpers
+function estimateTokensFromText(text: string): number {
+  if (!text) return 0;
+  try {
+    const bytes = new TextEncoder().encode(text).length;
+    return Math.ceil(bytes / 4);
+  } catch {
+    return Math.ceil(text.length / 4);
+  }
+}
+
+function estimateTokensFromMessages(messages: Message[]): number {
+  return messages.reduce((acc, m) => acc + estimateTokensFromText(m.content || ''), 0);
+}
+
+function estimatePromptTokens(messages: Message[]): number {
+  return estimateTokensFromMessages(messages);
+}
+
+function updateEstimatedUsage(conversationId: string, messageId: string, content: string) {
+  if (!conversationId || currentChatId.value !== conversationId) return;
+  const estimate = estimateTokensFromText(content || '');
+  const prev = perMessageUsage.value[messageId] || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const prompt = prev.prompt_tokens || 0;
+  const completion = Math.max(prev.completion_tokens || 0, estimate);
+  const total = Math.max(prev.total_tokens || 0, prompt + completion);
+  perMessageUsage.value[messageId] = {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: total,
+    estimated: true,
+  };
+}
+
+function getUsageForMessage(messageId: string) {
+  return perMessageUsage.value[messageId];
+}
+
+function handleTokenStatsUpdate(stats: TokenStats) {
+  tokenStats.value = stats;
+}
+
+const tokenUsageListener = (event: Event) => {
+  try {
+    const detail: any = (event as any).detail || {};
+    const usage = detail.usage as TokenUsage;
+    if (!usage) return;
+
+    // 优先使用事件中的会话ID，否则回退到当前会话
+    let conversationId: string | undefined = detail.conversationId || currentChatId.value;
+    if (!conversationId) return;
+
+    // 仅在对应会话处于生成中时更新
+    const isGen = !!generatingChats.value.get(conversationId);
+    if (!isGen) return;
+
+    // 确定目标消息ID：优先用事件提供的，否则使用该会话中最后一条助手消息
+    let targetMessageId: string | undefined = detail.messageId;
+    if (!targetMessageId) {
+      const msgs =
+        conversationId === currentChatId.value
+          ? currentMessages.value
+          : conversationCache.value.get(conversationId) || [];
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (m.role === 'assistant') {
+          targetMessageId = m.id;
+          break;
+        }
+      }
+    }
+
+    if (targetMessageId) {
+      perMessageUsage.value[targetMessageId] = {
+        prompt_tokens: usage.prompt_tokens || 0,
+        completion_tokens: usage.completion_tokens || 0,
+        total_tokens: usage.total_tokens || 0,
+        estimated: false,
+      };
+    }
+
+    // 全局 tokenCounter 已在事件源更新，这里避免重复累加以防双重计数。
+  } catch (e) {
+    console.warn('Failed to handle token usage event:', e);
+  }
+};
 
 // 开始编辑消息
 function startEditMessage(message: Message) {
@@ -763,20 +998,10 @@ async function saveAndResendMessage() {
             {{ chatList.find(chat => chat.id === currentChatId)?.title || '新对话' }}
           </div>
           <div class="chat-actions">
-            <div class="model-selector" v-if="modelStore.isConfigsLoaded && modelStore.modelConfigs.length > 0">
-              <select v-model="modelStore.currentModelId" class="model-select">
-                <option 
-                  v-for="model in modelStore.modelConfigs" 
-                  :key="model.id" 
-                  :value="model.id"
-                >
-                  {{ model.name }}
-                </option>
-              </select>
-            </div>
+          <div class="token-total">Tokens: {{ currentConversationTokenTotal }}</div>
           </div>
         </div>
-        <div class="messages-container" ref="messagesContainer">
+        <div class="messages-container" ref="messagesContainer" @scroll="handleMessagesScroll">
           <div v-if="currentMessages.length === 0" class="empty-placeholder">
             这是新对话的开始，请输入您的问题
           </div>
@@ -801,13 +1026,38 @@ async function saveAndResendMessage() {
                 </div>
                     <div v-else class="message-content-wrapper">
       <div class="message-text">
-        <template v-for="(block, index) in parseMessage(message.content)" :key="index">
-          <CodeBlock v-if="isCodeBlock(block)" :code="block.code" :language="block.language" />
-          <MarkdownRenderer v-else-if="isMarkdownBlock(block)" :content="block.content" />
+        <template v-for="(cblock, index) in getBlocksForMessage(message)" :key="index">
+          <template v-if="cblock.type === 'text'">
+            <template v-for="(sub, sidx) in parseMessage(String(cblock.content))" :key="sidx">
+              <CodeBlock v-if="isCodeBlock(sub)" :code="sub.code" :language="sub.language" />
+              <MarkdownRenderer v-else-if="isMarkdownBlock(sub)" :content="sub.content" />
+            </template>
+          </template>
+          <div v-else-if="cblock.type === 'tool_call'" class="tool-call-block">
+            🔧 工具调用：{{ cblock.content }}
+          </div>
+          <div v-else-if="cblock.type === 'tool_message'" class="tool-message-block">
+            <pre>{{ typeof cblock.content === 'string' ? cblock.content : JSON.stringify(cblock.content, null, 2) }}</pre>
+          </div>
+          <div v-else-if="cblock.type === 'url_links'" class="url-links-block">
+            <div v-for="(link, lidx) in (Array.isArray(cblock.content) ? cblock.content : [])" :key="lidx">
+              <a :href="link" target="_blank" rel="noopener noreferrer">{{ link }}</a>
+            </div>
+          </div>
+          <div v-else-if="cblock.type === 'plan_steps'" class="plan-steps-block">
+            <ol>
+              <li v-for="(step, pidx) in (Array.isArray(cblock.content) ? cblock.content : [cblock.content])" :key="pidx">
+                {{ step }}
+              </li>
+            </ol>
+          </div>
+          <div v-else-if="cblock.type === 'step_result'" class="step-result-block">
+            <pre>{{ typeof cblock.content === 'string' ? cblock.content : JSON.stringify(cblock.content, null, 2) }}</pre>
+          </div>
         </template>
       </div>
       <!-- 加载动画，仅当是最后一条消息且是AI角色且内容为空且正在生成时显示 -->
-      <div v-if="message.role === 'assistant' && !message.content && generatingChats.get(currentChatId) && message.id === currentMessages[currentMessages.length - 1].id" 
+      <div v-if="message.role === 'assistant' && generatingChats.get(currentChatId) && message.id === currentMessages[currentMessages.length - 1].id" 
            class="loading-dots">
         <span class="dot"></span>
         <span class="dot"></span>
@@ -818,7 +1068,7 @@ async function saveAndResendMessage() {
         <div class="message-actions">
           <button 
             class="action-btn copy" 
-            @click="copyMessageContent(message.content)"
+            @click="copyMessage(message)"
             title="复制"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
@@ -837,11 +1087,28 @@ async function saveAndResendMessage() {
           </button>
         </div>
       </div>
+      <div v-if="getUsageForMessage(message.id) && message.role === 'assistant'" class="token-usage">
+        Tokens: {{ getCumulativeTotalForMessage(message.id) }}
+      </div>
     </div>
               </div>
             </div>
           </div>
-        </div>
+
+                  </div>
+        
+        <button
+          v-show="!isAtBottom"
+          class="scroll-to-bottom"
+          @click="jumpToBottom"
+          title="回到底部"
+          aria-label="回到底部"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 16l-6-6h12l-6 6z"/>
+          </svg>
+        </button>
+
         <div class="input-container">
           <textarea 
             v-model="userInput" 
@@ -849,11 +1116,50 @@ async function saveAndResendMessage() {
             class="message-input"
             @keydown.enter.prevent="sendMessage"
           ></textarea>
-          <button class="send-btn" @click="sendMessage" :disabled="generatingChats.get(currentChatId)">发送</button>
+          <div class="input-footer">
+            <div class="left-controls">
+              <TaskModeSelector v-model:mode="taskMode" />
+              <div class="model-selector">
+                <ModelSelector
+                  v-model:modelValue="modelStore.currentModelId"
+                  :options="modelStore.modelConfigs"
+                  labelKey="name"
+                  valueKey="id"
+                  direction="up"
+                />
+              </div>
+            </div>
+
+            <div class="generate-controls">
+              <!-- 未生成：发送按钮 -->
+              <button
+                v-if="!generatingChats.get(currentChatId)"
+                class="send-btn icon"
+                @click="sendMessage"
+                title="发送"
+                aria-label="发送"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+                  <path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/>
+                </svg>
+              </button>
+
+              <!-- 生成中：转圈圈，点击停止生成 -->
+              <button
+                v-else
+                class="send-btn icon spinning"
+                @click="stopGeneration"
+                title="停止生成"
+                aria-label="停止生成"
+              >
+                <span class="spinner" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
       <div v-else class="empty-state">
-        <h2>欢迎使用Poly.AI</h2>
+        <h2>欢迎使用Dora.AI</h2>
         <p>选择一个对话或创建新对话开始</p>
         <div class="buttons-container">
           <button class="new-chat-btn-large" @click="createNewChat">
@@ -865,6 +1171,28 @@ async function saveAndResendMessage() {
             <span class="text">设置</span>
           </button>
         </div>
+      </div>
+    </div>
+    
+    <!-- 右侧 Studio 停靠容器 -->
+    <div class="studio-dock" :class="{ collapsed: isStudioCollapsed }">
+      <div class="studio-dock__gutter">
+        <button
+          class="studio-toggle"
+          @click="toggleStudio"
+          :title="isStudioCollapsed ? '展开工作室' : '收起工作室'"
+          :aria-expanded="!isStudioCollapsed"
+        >
+          <svg v-if="isStudioCollapsed" width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M9 6l6 6-6 6V6z"/>
+          </svg>
+          <svg v-else width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M15 6l-6 6 6 6V6z"/>
+          </svg>
+        </button>
+      </div>
+      <div class="studio-dock__panel" v-if="!isStudioCollapsed">
+        <StudioPane :dock="true" />
       </div>
     </div>
     
@@ -1084,6 +1412,7 @@ async function saveAndResendMessage() {
   flex-direction: column;
   height: 100%;
   background-color: #ffffff;
+  position: relative; /* 供回底部按钮定位 */
 }
 
 .chat-header {
@@ -1106,32 +1435,45 @@ async function saveAndResendMessage() {
   gap: 12px;
 }
 
-.model-selector {
-  position: relative;
+.chat-actions .model-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.model-select {
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  background: none;
+.chat-actions .model-selector .selector-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.chat-actions .model-selector .model-select {
+  padding: 6px 8px;
   border: 1px solid var(--border-color);
-  padding: 6px 28px 6px 12px;
-  font-size: 14px;
+  background: var(--bg-color);
   color: var(--text-primary);
-  background-color: var(--hover-bg);
-  border-radius: 6px;
+  border-radius: 4px;
+  font-size: 12px;
   cursor: pointer;
-  position: relative;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='gray'><polygon points='0,0 12,0 6,8'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
+  min-width: 120px;
+  transition: all 0.2s;
 }
 
-.model-select:focus {
+.chat-actions .model-selector .model-select:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-color);
+}
+
+.chat-actions .model-selector .model-select:focus {
   outline: none;
   border-color: var(--primary-color);
-  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+  background: var(--hover-bg);
+}
+
+.chat-actions .model-selector .model-select option {
+  background: #ffffff;
+  color: var(--text-primary);
+  padding: 4px;
 }
 
 .settings-btn {
@@ -1292,11 +1634,16 @@ async function saveAndResendMessage() {
 }
 
 .input-container {
-  padding: 16px;
+  padding: 12px 16px;
   border-top: 0px solid var(--border-color);
   display: flex;
-  gap: 12px;
+  flex-direction: column;
+  gap: 8px;
   background-color: #ffffff;
+  border: none;
+  border-radius: 10px;
+  margin: 12px;
+  height: 150px;
 }
 
 .message-input {
@@ -1305,34 +1652,205 @@ async function saveAndResendMessage() {
   border-radius: 8px;
   border: 0px solid var(--border-color);
   resize: none;
-  height: 80px;
+  height: 100px;
   font-family: inherit;
   background-color: var(--bg-color);
   color: var(--text-primary);
+}
+
+/* Remove default focus outlines on inputs */
+.message-input:focus,
+.message-input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.edit-message-input:focus,
+.edit-message-input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 .message-input::placeholder {
   color: var(--text-secondary);
 }
 
-.send-btn {
-  align-self: flex-end;
-  padding: 0 20px;
-  height: 40px;
-  background-image: var(--gradient-blue);
-  color: white;
+.input-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.generating-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 10px 0 6px 0;
+}
+.generating-banner .generating-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
   border: none;
-  border-radius: 8px;
-  font-weight: 500;
+  background-image: var(--gradient-blue);
+  border-radius: 9999px;
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.18);
+  color: #ffffff;
+}
+.bounce-dot {
+  width: 6px;
+  height: 6px;
+  background-color: #ffffff;
+  border-radius: 50%;
+  display: inline-block;
+  animation: dotBounce 1.2s infinite ease-in-out;
+}
+.bounce-dot:nth-child(1) { animation-delay: 0s; }
+.bounce-dot:nth-child(2) { animation-delay: 0.2s; }
+.bounce-dot:nth-child(3) { animation-delay: 0.4s; }
+.generating-text {
+  font-size: 12px;
+  color: #ffffff;
+}
+
+.generating-banner .stop-btn.banner {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  font-size: 14px;
+  line-height: 1;
+}
+.generating-banner .stop-btn.banner:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.left-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.model-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-selector .selector-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.model-selector .model-select {
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-color);
+  color: var(--text-primary);
+  border-radius: 4px;
+  font-size: 12px;
   cursor: pointer;
-  transition: all 0.3s;
-  box-shadow: 0 4px 6px rgba(99, 102, 241, 0.2);
+  min-width: 120px;
+  transition: all 0.2s;
+}
+
+.model-selector .model-select:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-color);
+}
+
+.model-selector .model-select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  background: var(--hover-bg);
+}
+
+.model-selector .model-select option {
+  background: #ffffff;
+  color: var(--text-primary);
+  padding: 4px;
+}
+
+.manage-btn {
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--hover-bg);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.send-btn {
+  background: transparent;
+  border: none;
+  padding: 6px;
+  height: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #7c6cf1; /* light purple icon color */
+  cursor: pointer;
+}
+
+.generate-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.generating-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.stop-btn {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: rgba(239, 68, 68, 0.08);
+  color: #ef4444;
+  cursor: pointer;
+}
+.stop-btn:hover {
+  background: rgba(239, 68, 68, 0.18);
 }
 
 .send-btn:hover {
-  background-image: linear-gradient(135deg, #6366f1, #4f46e5);
-  transform: translateY(-1px);
-  box-shadow: 0 6px 8px rgba(99, 102, 241, 0.3);
+  color: #5f51e6; /* slightly darker on hover */
+  transform: none;
+  box-shadow: none;
+  background: transparent;
+}
+
+.send-btn.icon svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+/* 生成中转圈圈样式 */
+.send-btn.icon.spinning {
+  color: #7c6cf1; /* 继承按钮主色 */
+}
+.send-btn.icon .spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .empty-state {
@@ -1654,5 +2172,136 @@ async function saveAndResendMessage() {
 }
 .window-control.logs:hover {
   background-color: rgba(99, 102, 241, 0.2);
+}
+
+/* Remove borders from TaskModeSelector and ModelSelector */
+.model-selector .model-select,
+.chat-actions .model-selector .model-select {
+  border: none !important;
+  box-shadow: none !important;
+}
+
+:deep(task-mode-selector),
+:deep(task-mode-selector *) {
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.model-selector :deep(*),
+.chat-actions .model-selector :deep(*) {
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* 右侧 Studio 停靠容器 */
+.studio-dock {
+  width: 36%;
+  min-width: 360px;
+  background: transparent; /* 避免圆角处露出深色背景 */
+  display: flex;
+}
+
+@media (max-width: 1024px) {
+  .studio-dock {
+    width: 32%;
+    min-width: 300px;
+  }
+}
+
+@media (max-width: 768px) {
+  .studio-dock {
+    display: none;
+  }
+}
+
+/* Studio dock collapse/expand */
+.studio-dock__gutter {
+  width: 20px;
+  min-width: 20px;
+  background: var(--hover-bg);
+  border-left: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.studio-dock__panel {
+  flex: 1;
+  display: flex;
+}
+.studio-dock.collapsed {
+  width: 20px !important;
+  min-width: 20px !important;
+}
+.studio-toggle {
+  width: 14px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-color);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+}
+.studio-toggle:hover {
+  background: var(--hover-bg);
+}
+
+/* Scroll-to-bottom button */
+.scroll-to-bottom {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 180px; /* 位于输入区上方，避免遮挡 */
+  width: 36px;
+  height: 36px;
+  border-radius: 9999px;
+  border: 1px solid #C4B5FD; /* purple-300 */
+  background: #EDE9FE; /* purple-100/200 淡紫色填充 */
+  color: #6D28D9; /* 深紫色图标 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(109, 40, 217, 0.18);
+  z-index: 3;
+  animation: bounceDown 1.4s infinite ease-in-out;
+}
+.scroll-to-bottom:hover {
+  background: #DDD6FE; /* hover 加深 */
+  border-color: #A78BFA; /* purple-400 */
+}
+
+@keyframes bounceDown {
+  0%, 100% {
+    transform: translateX(-50%) translateY(0);
+  }
+  50% {
+    transform: translateX(-50%) translateY(-6px);
+  }
+}
+
+/* Token usage UI */
+.token-usage {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.token-usage .token-item {
+  padding: 2px 6px;
+  background: rgba(99, 102, 241, 0.08);
+  border-radius: 6px;
+}
+.token-usage .estimated-prefix {
+  color: #f59e0b;
+}
+.token-total {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 </style>

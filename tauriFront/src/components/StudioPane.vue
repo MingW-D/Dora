@@ -27,7 +27,7 @@
       </template>
     </div>
   </div>
-></template>
+</template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
@@ -109,14 +109,15 @@ studioBus.subscribe({
   bottom: 16px;
   width: min(960px, 90vw);
   height: min(600px, 70vh);
-  background: #111827;
+  background: #0b0b0f; /* 黑色主题 */
   color: #e5e7eb;
-  border: 1px solid #374151;
-  border-radius: 8px;
+  border: 1px solid #1f2937;
+  border-radius: 12px; /* 四角圆角 */
   display: flex;
   flex-direction: column;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
   z-index: 9999;
+  overflow: hidden; /* 让内部 iframe 也遵循圆角 */
 }
 .studio-pane.dock {
   position: static;
@@ -124,22 +125,21 @@ studioBus.subscribe({
   bottom: auto;
   width: 100%;
   height: 100%;
-  box-shadow: none;
-  border: none;
+  /* 保留圆角与边框，dock 模式不去掉阴影与边框 */
 }
 .studio-pane__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 8px 12px;
-  border-bottom: 1px solid #374151;
+  border-bottom: 1px solid #1f2937;
 }
 .studio-pane__title { font-weight: 600; }
 .studio-pane__close { background: transparent; color: #9ca3af; border: none; font-size: 18px; cursor: pointer; }
 .studio-pane__content { flex: 1; overflow: auto; }
-.studio-pane__iframe { width: 100%; height: 100%; border: none; background: #fff; }
-.studio-pane__pre { padding: 12px; white-space: pre-wrap; word-break: break-word; }
+.studio-pane__iframe { width: 100%; height: 100%; border: none; background: #0b0b0f; }
+.studio-pane__pre { padding: 12px; white-space: pre-wrap; word-break: break-word; background: #0b0b0f; color: #e5e7eb; border: 1px solid #1f2937; border-radius: 8px; }
 .studio-pane__list { list-style: none; margin: 0; padding: 12px; }
-.studio-pane__list pre { background: #0b1220; padding: 8px; border-radius: 6px; }
+.studio-pane__list pre { background: #111827; color: #e5e7eb; padding: 8px; border-radius: 6px; border: 1px solid #374151; }
 </style>
 

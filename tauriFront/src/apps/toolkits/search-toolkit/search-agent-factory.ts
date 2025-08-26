@@ -1,5 +1,5 @@
 import type { PreviewListItem } from '@lugu-manus/share';
-import axios from 'axios';
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import * as yaml from 'js-yaml';
@@ -42,7 +42,6 @@ export function createSearchAgent(config: SearchEngineConfig): SpecializedToolAg
 
     async execute(query: Record<string, string>, taskRef: AgentTaskRef): Promise<unknown> {
       const results: PreviewListItem[] = [];
-      let cookies = '';
 
       for (let page = 0; page < (config.pageCount || 2); page++) {
         if (config.delay && page > 0) {
@@ -50,27 +49,20 @@ export function createSearchAgent(config: SearchEngineConfig): SpecializedToolAg
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
 
-        const response = await axios.get(config.url, {
-          params: config.params(query.query, page),
-          responseType: 'text',
+        const urlObj = new URL(config.url);
+        const qParams = config.params(query.query, page);
+        Object.entries(qParams).forEach(([k, v]) => urlObj.searchParams.set(k, String(v)));
+
+        const response = await tauriFetch(urlObj.toString(), {
+          method: 'GET',
           headers: {
             ...commonHeader,
-            Host: config.host,
-            Referer: config.referrer,
-            Cookie: cookies,
           },
         });
 
-        const setCookieHeader = response.headers['set-cookie'] as unknown as string;
-        if (setCookieHeader) {
-          if (Array.isArray(setCookieHeader)) {
-            cookies = setCookieHeader.map((cookie) => cookie.split(';')[0]).join('; ');
-          } else {
-            cookies = setCookieHeader.split(';')[0];
-          }
-        }
-
-        const $ = cheerio.load(response.data);
+        
+        const html = await response.text();
+        const $ = cheerio.load(html);
         $(config.selector).each((index, element) => {
           const title = $(element).find(config.titleSelector).text();
           const link = $(element).find(config.linkSelector).attr('href');

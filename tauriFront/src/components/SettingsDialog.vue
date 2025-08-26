@@ -256,7 +256,7 @@ async function saveApiKey() {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: 20000; /* 提升层级，确保覆盖 Studio 等高层元素 */
 }
 
 .settings-dialog {

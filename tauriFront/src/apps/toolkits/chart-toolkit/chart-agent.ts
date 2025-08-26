@@ -1,5 +1,12 @@
-import { createCanvas } from 'canvas';
 import { Chart, type ChartItem } from 'chart.js/auto';
+
+// DOM canvas helper for Tauri webview (replaces node-canvas)
+const createCanvas = (width: number, height: number): HTMLCanvasElement => {
+  const c = document.createElement('canvas');
+  c.width = width;
+  c.height = height;
+  return c;
+};
 import { mkdir, exists, writeFile } from '@tauri-apps/plugin-fs';
 import { appDataDir, resolve } from '@tauri-apps/api/path';
 import yaml from 'js-yaml';
@@ -297,9 +304,12 @@ export class ChartAgent extends BaseAgent implements SpecializedToolAgent {
     const fileName = `chart-${Date.now()}.png`;
     const filePath = await resolve(chartDir, fileName);
 
-    // 将 canvas 转换为图片并保存
-    const buffer = canvas.toBuffer('image/png');
-    await writeFile(filePath, new Uint8Array(buffer));
+    // 将 canvas 转换为图片并保存（Web API）
+    const blob: Blob = await new Promise((resolve) =>
+      canvas.toBlob((b) => resolve(b as Blob), 'image/png')
+    );
+    const arrayBuffer = await blob.arrayBuffer();
+    await writeFile(filePath, new Uint8Array(arrayBuffer));
 
     return {
       chartData: config,
