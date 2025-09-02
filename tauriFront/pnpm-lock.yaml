@@ -77,6 +77,9 @@ importers:
       '@tauri-apps/plugin-window':
         specifier: ^2.0.0-alpha.1
         version: 2.0.0-alpha.1
+      '@trpc/client':
+        specifier: ^11.5.0
+        version: 11.5.0(@trpc/server@11.5.0(typescript@5.6.3))(typescript@5.6.3)
       '@types/node':
         specifier: ^24.0.4
         version: 24.0.4
@@ -101,6 +104,9 @@ importers:
       cheerio:
         specifier: ^1.1.2
         version: 1.1.2
+      domhandler:
+        specifier: ^5.0.3
+        version: 5.0.3
       exceljs:
         specifier: ^4.4.0
         version: 4.4.0
@@ -170,6 +176,9 @@ importers:
       rxjs:
         specifier: ^7.8.1
         version: 7.8.2
+      superjson:
+        specifier: ^2.2.2
+        version: 2.2.2
       uuid:
         specifier: ^11.1.0
         version: 11.1.0
@@ -1637,6 +1646,17 @@ packages:
 
   '@tokenizer/token@0.3.0':
     resolution: {integrity: sha512-OvjF+z51L3ov0OyAU0duzsYuvO01PH7x4t6DJx+guahgTnBHkhJdG7soQeTSFLWN3efnHyibZ4Z8l2EuWwJN3A==}
+
+  '@trpc/client@11.5.0':
+    resolution: {integrity: sha512-32oH+KOAdo73jJKjU9tyG+vCjID6A28NgXwUNr691O5HjpF5yyTX51Zzyee8YtGzU89Nw/drCHdfA4gD7BN2eg==}
+    peerDependencies:
+      '@trpc/server': 11.5.0
+      typescript: '>=5.7.2'
+
+  '@trpc/server@11.5.0':
+    resolution: {integrity: sha512-0IBtkmUCeO2ycn4K45/cqsujnlCQrSvkCo7lFDpg3kGMIPiLyLRciID5IiS7prEjRjeITa+od2aaHTIwONApVw==}
+    peerDependencies:
+      typescript: '>=5.7.2'
 
   '@types/debug@4.1.12':
     resolution: {integrity: sha512-vIChWdVG3LG1SMxEvI/AK+FWJthlrqlTu7fbrlywTkkaONwk/UAGaULXRlf8vkzFBLVm0zkMdCquhL5aOjhXPQ==}
@@ -4844,6 +4864,15 @@ snapshots:
       '@tauri-apps/api': 2.0.0-alpha.6
 
   '@tokenizer/token@0.3.0': {}
+
+  '@trpc/client@11.5.0(@trpc/server@11.5.0(typescript@5.6.3))(typescript@5.6.3)':
+    dependencies:
+      '@trpc/server': 11.5.0(typescript@5.6.3)
+      typescript: 5.6.3
+
+  '@trpc/server@11.5.0(typescript@5.6.3)':
+    dependencies:
+      typescript: 5.6.3
 
   '@types/debug@4.1.12':
     dependencies:

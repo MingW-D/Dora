@@ -19,11 +19,11 @@ export async function* subscribeConversation(
         try {
           if (message && typeof message === 'object' && typeof (message as any).content === 'string') {
             const raw = (message as any).content as string;
-            const upper = raw.toUpperCase();
-            // 标记任务完成信号，供前端判断真正结束
-            if (upper.includes('<TASK_DONE>') || upper.includes('[TASK_DONE]') || upper.includes('TASK_DONE')) {
-              (message as any).taskDone = true;
-            }
+            // const upper = raw.toUpperCase();
+            // // 标记任务完成信号，供前端判断真正结束
+            // // if (upper.includes('<TASK_DONE>') || upper.includes('[TASK_DONE]') || upper.includes('TASK_DONE')) {
+            // //   (message as any).taskDone = true;
+            // // }
             // 对可见文本进行过滤
             (message as any).content = removeFilterPatterns(raw);
           }

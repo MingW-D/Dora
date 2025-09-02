@@ -1,4 +1,4 @@
-import type { PreviewListItem } from '@lugu-manus/share';
+import type { PreviewListItem } from '@dora/share';
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
@@ -7,6 +7,7 @@ import { BaseAgent } from '../../agent/base-agent.js';
 import type { AgentTaskRef } from '../../agent/type.js';
 import type { SpecializedToolAgent, SpecializedToolAgentConstructor } from '../types.js';
 import { commonHeader } from './common-header.js';
+import axios from 'axios';
 
 // 搜索引擎配置接口
 interface SearchEngineConfig {
@@ -42,6 +43,7 @@ export function createSearchAgent(config: SearchEngineConfig): SpecializedToolAg
 
     async execute(query: Record<string, string>, taskRef: AgentTaskRef): Promise<unknown> {
       const results: PreviewListItem[] = [];
+      // const cookies = ''; // 不再手动管理 Cookie
 
       for (let page = 0; page < (config.pageCount || 2); page++) {
         if (config.delay && page > 0) {
@@ -49,19 +51,23 @@ export function createSearchAgent(config: SearchEngineConfig): SpecializedToolAg
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
 
-        const urlObj = new URL(config.url);
-        const qParams = config.params(query.query, page);
-        Object.entries(qParams).forEach(([k, v]) => urlObj.searchParams.set(k, String(v)));
+        // 使用 tauriFetch 避免浏览器 CORS/受限请求头问题
+        const url = new URL(config.url);
+        const params = config.params(query.query, page);
+        Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
 
-        const response = await tauriFetch(urlObj.toString(), {
+        const response = await tauriFetch(url.toString(), {
           method: 'GET',
           headers: {
             ...commonHeader,
+            // 不要设置受限头：Host/Referer/Cookie
           },
         });
-
-        
         const html = await response.text();
+
+        // 由于不再从响应头读取 set-cookie，这一段删除
+        // const setCookieHeader = response.headers['set-cookie'] as unknown as string;
+
         const $ = cheerio.load(html);
         $(config.selector).each((index, element) => {
           const title = $(element).find(config.titleSelector).text();
@@ -98,3 +104,4 @@ export function createSearchAgent(config: SearchEngineConfig): SpecializedToolAg
     }
   } as unknown as SpecializedToolAgentConstructor;
 }
+

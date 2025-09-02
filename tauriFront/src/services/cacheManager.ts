@@ -4,9 +4,10 @@ import { v4 as uuidv4 } from 'uuid';
 
 // 内容块类型定义
 export interface MessageContentBlock {
-  type: 'text' | 'tool_call' | 'url_links' | 'plan_steps' | 'step_result' | 'tool_message';
+  type: 'text' | 'tool_call' | 'url_links' | 'plan_steps' | 'step_result' | 'tool_message' | 'task' | 'subtask_status' | 'final_result';
   content: string | string[] | any;
   timestamp?: number;
+  id?: string;
 }
 
 // 缓存对话数据结构
@@ -147,7 +148,7 @@ class CacheManager {
               } else if (block.type === 'url_links') {
                 conversation.urlLinks.set(message.id, block.content as string[]);
               }
-              // tool_message 类型的消息不需要特别处理，已经在contentBlocks中
+              // tool_message, subtask_status, final_result 类型的消息不需要特别处理，已经在contentBlocks中
             }
           } else {
             // 如果不是数组或为空，创建单个文本块
@@ -683,4 +684,4 @@ class CacheManager {
 
 // 导出单例
 const cacheManager = new CacheManager();
-export default cacheManager; 
+export default cacheManager;

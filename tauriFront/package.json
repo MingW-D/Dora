@@ -33,6 +33,7 @@
     "@tauri-apps/plugin-shell": "^2.0.1",
     "@tauri-apps/plugin-sql": "^2.3.0",
     "@tauri-apps/plugin-window": "^2.0.0-alpha.1",
+    "@trpc/client": "^11.5.0",
     "@types/node": "^24.0.4",
     "@types/uuid": "^10.0.0",
     "@vicons/material": "^0.13.0",
@@ -41,6 +42,7 @@
     "canvas": "^2.11.2",
     "chart.js": "^4.4.0",
     "cheerio": "^1.1.2",
+    "domhandler": "^5.0.3",
     "exceljs": "^4.4.0",
     "highlight.js": "^11.11.1",
     "js-tiktoken": "^1.0.21",
@@ -64,6 +66,7 @@
     "react-use": "^17.6.0",
     "react-window": "^1.8.11",
     "rxjs": "^7.8.1",
+    "superjson": "^2.2.2",
     "uuid": "^11.1.0",
     "vue": "^3.5.13",
     "xml2js": "^0.6.2"

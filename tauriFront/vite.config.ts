@@ -35,7 +35,13 @@ export default defineConfig(async () => ({
   define: {
     global: 'globalThis',
   },
-  
+
+  resolve: {
+    alias: {
+      '@dora/share': path.resolve(__dirname, 'packages/share/index.ts'),
+    },
+  },
+
   optimizeDeps: {
     include: [
       'axios', 

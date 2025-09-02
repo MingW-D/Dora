@@ -87,10 +87,23 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
     this.subTasks = subTasks;
 
     // 步骤2: 执行子任务
-    for (const subTask of subTasks) {
+    for (let i = 0; i < subTasks.length; i++) {
+      const subTask = subTasks[i];
       if (taskRef.abortSignal.aborted) {
         return 'Task has been aborted.';
       }
+
+      // 发送子任务开始消息 - 使用内容块聚合
+      const startMessage = await taskRef.createMessage('Task Manager');
+      startMessage.content = JSON.stringify({
+        type: 'subtask_start',
+        subtaskId: subTask.id,
+        description: subTask.description,
+        status: 'running',
+        completedSubtasks: subTasks.filter(t => t.completed).length,
+        totalSubtasks: subTasks.length
+      });
+      taskRef.observer.next(startMessage);
 
       let retryCount = 0;
       let retryResult = '';
@@ -108,14 +121,84 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
 
         // 如果验证失败，尝试重新执行一次
         if (validateResult.isValid) {
+                  // 发送子任务完成消息 - 使用内容块聚合
+        const completeMessage = await taskRef.createMessage('Task Manager');
+        completeMessage.content = JSON.stringify({
+          type: 'subtask_complete',
+          subtaskId: subTask.id,
+          description: subTask.description,
+          result: result,
+          status: 'completed',
+          completedSubtasks: subTasks.filter(t => t.completed).length,
+          totalSubtasks: subTasks.length,
+          validationResult: true
+        });
+        taskRef.observer.next(completeMessage);
           break;
         }
         retryCount++;
+      }
+
+      // 如果重试3次仍然失败 - 使用内容块聚合
+      if (!subTask.completed) {
+        const failMessage = await taskRef.createMessage('Task Manager');
+        failMessage.content = JSON.stringify({
+          type: 'subtask_failed',
+          subtaskId: subTask.id,
+          description: subTask.description,
+          status: 'failed',
+          completedSubtasks: subTasks.filter(t => t.completed).length,
+          totalSubtasks: subTasks.length,
+          validationResult: false
+        });
+        taskRef.observer.next(failMessage);
       }
     }
 
     // 步骤3: 汇总结果
     return await this.summarizeResults(query.task, subTasks, query.expected_result, taskRef);
+  }
+
+  // 新增：安全提取顶层 JSON 片段（支持 '[' 或 '{'），处理字符串与转义，避免被内部 [] 或 {} 误截断
+  private extractBalancedJSON(text: string, startChar: '[' | '{'): string | null {
+    const endChar = startChar === '[' ? ']' : '}';
+    const start = text.indexOf(startChar);
+    if (start === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let stringChar: '"' | "'" | null = null;
+
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      const prev = i > 0 ? text[i - 1] : '';
+
+      if (inString) {
+        // 处理字符串结束（忽略被转义的引号）
+        if (ch === stringChar && prev !== '\\') {
+          inString = false;
+          stringChar = null;
+        }
+        continue;
+      } else {
+        // 进入字符串
+        if (ch === '"' || ch === "'") {
+          inString = true;
+          stringChar = ch as '"' | "'";
+          continue;
+        }
+
+        if (ch === startChar) {
+          depth++;
+        } else if (ch === endChar) {
+          depth--;
+          if (depth === 0) {
+            return text.slice(start, i + 1);
+          }
+        }
+      }
+    }
+    return null;
   }
 
   private async decomposeTasks(task: string, taskRef: AgentTaskRef): Promise<SubTask[]> {
@@ -144,6 +227,7 @@ Output a list of subtasks in JSON format.`;
       description: 'Task Planning',
       payload: '',
     });
+    messageModel.messageType = 'task_planning';
 
     completion.contentStream.subscribe({
       next: (chunk) => {
@@ -172,27 +256,29 @@ Output a list of subtasks in JSON format.`;
       // 尝试从回复中提取JSON
       let jsonContent = '';
 
-      // 匹配 markdown 代码块中的 JSON
-      const markdownMatch = content.match(/```(?:json)?\n([\s\S]*?)\n```/);
+      // 优先：Markdown 代码块
+      const markdownMatch = content.match(/```(?:json)?[\s\r\n]*([\s\S]*?)```/i);
       if (markdownMatch) {
         jsonContent = markdownMatch[1].trim();
       }
-      // 匹配数组
-      else if (content.includes('[') && content.includes(']')) {
-        const arrayMatch = content.match(/\[([\s\S]*?)\]/);
-        if (arrayMatch) {
-          jsonContent = `[${arrayMatch[1]}]`;
+      // 次之：顶层数组（用括号计数保障完整性）
+      else {
+        const arraySegment = this.extractBalancedJSON(content, '[');
+        if (arraySegment) {
+          jsonContent = arraySegment.trim();
+        } else {
+          // 再次尝试：顶层对象
+          const objectSegment = this.extractBalancedJSON(content, '{');
+          if (objectSegment) {
+            jsonContent = objectSegment.trim();
+          } else {
+            // 最后兜底：直接使用全文
+            jsonContent = content.trim();
+          }
         }
       }
-      // 匹配对象
-      else if (content.includes('{') && content.includes('}')) {
-        const objMatch = content.match(/\{([\s\S]*?)\}/);
-        if (objMatch) {
-          jsonContent = `{${objMatch[1]}}`;
-        }
-      } else {
-        jsonContent = content;
-      }
+
+      console.log('jsonContent', jsonContent);
 
       // 尝试解析 JSON
       try {
@@ -211,7 +297,7 @@ Output a list of subtasks in JSON format.`;
 
         // 确保解析结果是数组
         const tasks = Array.isArray(parsedContent) ? parsedContent : [parsedContent];
-        return tasks.map(
+        const subTasks = tasks.map(
           (task: { id: number; description: string; dependencies?: number[] }, index: number) => ({
             id: task.id || index + 1,
             description: task.description,
@@ -219,6 +305,26 @@ Output a list of subtasks in JSON format.`;
             dependencies: task.dependencies || [],
           }),
         );
+
+        // 发送 plan_steps 消息给前端
+        const planStepsMessage = await taskRef.createMessage('Task-Oriented-Agent');
+        planStepsMessage.messageType = 'plan_steps';
+        
+        // 创建内容块
+        const planStepsBlock = {
+          type: 'plan_steps' as const,
+          content: subTasks.map(task => `${task.description}${task.dependencies && task.dependencies.length > 0 ? ` (依赖: ${task.dependencies.join(', ')})` : ''}`),
+          metadata: {
+            totalSteps: subTasks.length,
+            planData: subTasks
+          }
+        };
+        
+        planStepsMessage.content = JSON.stringify([planStepsBlock]);
+        taskRef.completeMessage(planStepsMessage);
+        taskRef.observer.next(planStepsMessage);
+
+        return subTasks;
       } catch (parseError) {
         console.error('JSON 解析失败，尝试手动解析', parseError);
         // 如果解析失败，尝试手动解析
@@ -235,6 +341,26 @@ Output a list of subtasks in JSON format.`;
               completed: false,
             });
           }
+        }
+
+        // 即使是手动解析的结果也发送 plan_steps 消息
+        if (tasks.length > 0) {
+          const planStepsMessage = await taskRef.createMessage('Task-Oriented-Agent');
+          planStepsMessage.messageType = 'plan_steps';
+          
+          // 创建内容块
+          const planStepsBlock = {
+            type: 'plan_steps' as const,
+            content: tasks.map(task => task.description),
+            metadata: {
+              totalSteps: tasks.length,
+              planData: tasks
+            }
+          };
+          
+          planStepsMessage.content = JSON.stringify([planStepsBlock]);
+          taskRef.completeMessage(planStepsMessage);
+          taskRef.observer.next(planStepsMessage);
         }
 
         return tasks;
@@ -255,6 +381,26 @@ Output a list of subtasks in JSON format.`;
             completed: false,
           });
         }
+      }
+
+      // 即使是异常情况下手动解析的结果也发送 plan_steps 消息
+      if (tasks.length > 0) {
+        const planStepsMessage = await taskRef.createMessage('Task-Oriented-Agent');
+        planStepsMessage.messageType = 'plan_steps';
+        
+        // 创建内容块
+        const planStepsBlock = {
+          type: 'plan_steps' as const,
+          content: tasks.map(task => task.description),
+          metadata: {
+            totalSteps: tasks.length,
+            planData: tasks
+          }
+        };
+        
+        planStepsMessage.content = JSON.stringify([planStepsBlock]);
+        taskRef.completeMessage(planStepsMessage);
+        taskRef.observer.next(planStepsMessage);
       }
 
       return tasks;
@@ -343,6 +489,11 @@ If all requirements are fully met, output "VALIDATED: true", otherwise output "V
     }
 
     const messageModel = await taskRef.createMessage('Task');
+    messageModel.messageType = 'validation';
+    messageModel.metadata = {
+      subtaskId: subTask.id,
+      subtaskDescription: subTask.description
+    };
     completion.contentStream.subscribe({
       next: (chunk) => {
         messageModel.content = chunk;
@@ -372,6 +523,17 @@ If all requirements are fully met, output "VALIDATED: true", otherwise output "V
     const completedTasks = subTasks.filter((task) => task.completed);
     const allCompleted = completedTasks.length === subTasks.length;
 
+    // 发送任务总结开始消息
+    const summaryStartMessage = await taskRef.createMessage('Task');
+    summaryStartMessage.messageType = 'task_summary';
+    summaryStartMessage.metadata = {
+      completedSubtasks: completedTasks.length,
+      totalSubtasks: subTasks.length,
+      isMainTaskComplete: allCompleted
+    };
+    summaryStartMessage.content = `正在生成任务总结...`;
+    taskRef.observer.next(summaryStartMessage);
+
     let prompt = `Based on the following completed subtask results, please generate a final task summary:\n\nMain task: ${task}\n\nExpected result: ${expectedResult}\n\n`;
 
     prompt += `Subtask completion status: ${completedTasks.length}/${subTasks.length}\n\n`;
@@ -393,6 +555,26 @@ If all requirements are fully met, output "VALIDATED: true", otherwise output "V
     if (!completion) {
       return 'Unable to generate final summary.';
     }
+
+    // 创建最终结果消息
+    const finalResultMessage = await taskRef.createMessage('Task');
+    finalResultMessage.messageType = 'final_result';
+    finalResultMessage.metadata = {
+      completedSubtasks: completedTasks.length,
+      totalSubtasks: subTasks.length,
+      isMainTaskComplete: allCompleted
+    };
+
+    completion.contentStream.subscribe({
+      next: (chunk) => {
+        finalResultMessage.content = chunk;
+        taskRef.observer.next(finalResultMessage);
+      },
+      complete() {
+        taskRef.completeMessage(finalResultMessage);
+        taskRef.observer.next(finalResultMessage);
+      },
+    });
 
     await taskRef.studio.startWithStream(
       {

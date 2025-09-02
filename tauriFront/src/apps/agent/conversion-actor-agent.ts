@@ -22,13 +22,14 @@ export class ConversionActorAgent {
   constructor(
     private conversationId: string,
     abortSignal: AbortSignal,
+    private existingMessageId?: string, // 前端创建的assistant消息ID
     observer = new ReplaySubject<MessageStream>(),
   ) {
     this.abortSignal = abortSignal;
     this.observer = observer;
 
-    // 初始化辅助类
-    this.messageHandler = new MessageHandler(conversationId);
+    // 初始化辅助类，传递现有消息ID
+    this.messageHandler = new MessageHandler(conversationId, existingMessageId);
   }
 
   async init(): Promise<void> {
@@ -42,7 +43,7 @@ export class ConversionActorAgent {
       // Tauri 适配的 BrowserUse（简化占位实现，负责协议对齐与事件桥接）
       this.browserUse = new TauriBrowserUse();
 
-      this.studio = new Studio(this.browserUse, this.conversationId);
+      this.studio = new Studio(this.browserUse, this.conversationId, this.messageHandler);
 
       console.log('init success');
     } catch (error) {
@@ -73,7 +74,7 @@ export class ConversionActorAgent {
   }
 
   async start(taskOrOptions?: string | { task: string; uiMessageId?: string }) {
-    this.validateInitialization();
+    await this.validateInitialization();
 
     // 解析参数：既兼容旧的字符串，也支持对象携带 uiMessageId
     const taskOverride =
@@ -132,23 +133,34 @@ export class ConversionActorAgent {
       observer: this.observer,
       createTaskMessage: async (task) => {
         const taskModel = await this.messageHandler.createTask(task);
-        const messageModel = await this.messageHandler.createMessage('Task', taskModel.id, 'TASK');
-        return messageModel;
+        // 添加任务类型的内容块到共享消息
+        return await this.messageHandler.addContentBlock('task', {
+          taskId: taskModel.id,
+          type: task.type,
+          description: task.description,
+          payload: task.payload
+        }, 'Task Manager');
       },
       completeTaskMessage: async (task) => {
         await this.messageHandler.completeTask(task);
       },
       createMessage: (roleName: string, taskId?: string) =>
-        this.messageHandler.createMessage(roleName, taskId),
-      completeMessage: (message, status = 'COMPLETED' as MessageStatus) =>
-        this.messageHandler.completeMessage(message, status),
+        this.messageHandler.addContentBlock('text', '', roleName),
+      completeMessage: async (message, status = 'COMPLETED' as MessageStatus) => {
+        // 更新当前内容块
+        if (message.content) {
+          await this.messageHandler.updateContentBlock(message.id, message.content);
+        }
+        // 当所有agent完成时才真正完成共享消息
+        return this.messageHandler.completeMessage(message, status);
+      },
       studio: this.studio,
     };
   }
 
-  private validateInitialization() {
+  private async validateInitialization() {
     if (!this.browserUse) {
-      this.init();
+      await this.init();
       return;
     }
   }

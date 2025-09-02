@@ -19,8 +19,30 @@ export type Message = {
 import type { ReplaySubject } from 'rxjs';
 import type { Studio } from './studio';
 
+export type MessageType = 
+  | 'text'              // 普通文本消息
+  | 'subtask_start'     // 子任务开始
+  | 'subtask_complete'  // 子任务完成
+  | 'subtask_failed'    // 子任务失败
+  | 'task_planning'     // 任务规划
+  | 'plan_steps'        // 计划步骤
+  | 'task_summary'      // 任务总结
+  | 'tool_call'         // 工具调用
+  | 'validation'        // 验证结果
+  | 'final_result';     // 最终结果
+
 export type MessageStream = Message & {
   task: Task | null;
+  messageType?: MessageType;
+  metadata?: {
+    subtaskId?: number;
+    subtaskDescription?: string;
+    subtaskStatus?: 'pending' | 'running' | 'completed' | 'failed';
+    completedSubtasks?: number;
+    totalSubtasks?: number;
+    validationResult?: boolean;
+    isMainTaskComplete?: boolean;
+  };
 };
 
 export type AgentTaskRef = {

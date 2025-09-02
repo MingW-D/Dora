@@ -14,9 +14,28 @@ export interface SearchProgress {
 
 // 消息内容块类型
 export interface MessageContentBlock {
-  type: 'text' | 'tool_call' | 'url_links' | 'plan_steps' | 'step_result' | 'tool_message';
-  content: string | string[] | StepResult | ToolMessage;
+  type: 'text' | 'tool_call' | 'url_links' | 'plan_steps' | 'step_result' | 'tool_message' | 'task' | 'subtask_status' | 'final_result';
+  content: string | string[] | StepResult | ToolMessage | TaskBlockContent | SubtaskStatus | FinalResult;
   timestamp?: number;
+  id?: string;
+}
+
+// 子任务状态类型
+export interface SubtaskStatus {
+  subtaskId: number;
+  subtaskDescription: string;
+  status: 'running' | 'completed' | 'failed';
+  completedSubtasks: number;
+  totalSubtasks: number;
+  validationResult?: boolean;
+}
+
+// 最终结果类型
+export interface FinalResult {
+  content: string;
+  completedSubtasks: number;
+  totalSubtasks: number;
+  isMainTaskComplete: boolean;
 }
 
 // 工具调用消息类型
@@ -117,4 +136,12 @@ export function typedFind<T>(
   predicate: (item: T) => boolean
 ): T | undefined {
   return array.find(predicate);
-} 
+}
+
+// 任务内容块类型（用于 UI 展示与预览触发）
+export interface TaskBlockContent {
+  id?: string;
+  type?: string;           // StudioActionType
+  description?: string;
+  payload?: any;
+}

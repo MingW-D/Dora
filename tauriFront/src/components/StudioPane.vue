@@ -25,6 +25,12 @@
       <template v-else-if="mode === 'folder'">
         <pre class="studio-pane__pre">{{ format(payload) }}</pre>
       </template>
+
+      <template v-else-if="mode === 'image'">
+        <div class="studio-pane__image-wrapper">
+          <img :src="imageUrl" class="studio-pane__image" alt="preview" />
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -33,7 +39,7 @@
 import { computed, ref } from 'vue';
 import { studioBus, type StudioAction } from '../services/studioBus';
 
-type Mode = 'html' | 'editor' | 'list' | 'folder';
+type Mode = 'html' | 'editor' | 'list' | 'folder' | 'image';
 
 const props = defineProps<{ dock?: boolean; title?: string }>();
 const dock = computed(() => props.dock === true);
@@ -45,6 +51,7 @@ const payload = ref<any>('');
 const htmlUrl = ref<string>('about:blank');
 const listPayload = ref<any[]>([]);
 const stringPayload = ref<string>('');
+const imageUrl = ref<string>(''); // 新增
 
 // const titleText = computed(() => props.title ?? (dock.value ? 'Dora 工作室' : `Studio Preview - ${mode.value}`));
 
@@ -90,6 +97,11 @@ studioBus.subscribe({
         payload.value = action.payload;
         break;
       }
+      case 'image': {
+        mode.value = 'image';
+        imageUrl.value = action.payload?.url ?? (typeof action.payload === 'string' ? action.payload : '');
+        break;
+      }
       case 'openFile':
       case 'editor':
       default: {
@@ -116,7 +128,7 @@ studioBus.subscribe({
   display: flex;
   flex-direction: column;
   box-shadow: 0 8px 32px rgba(0,0,0,0.6);
-  z-index: 9999;
+  z-index: 100;
   overflow: hidden; /* 让内部 iframe 也遵循圆角 */
 }
 .studio-pane.dock {
@@ -141,5 +153,7 @@ studioBus.subscribe({
 .studio-pane__pre { padding: 12px; white-space: pre-wrap; word-break: break-word; background: #0b0b0f; color: #e5e7eb; border: 1px solid #1f2937; border-radius: 8px; }
 .studio-pane__list { list-style: none; margin: 0; padding: 12px; }
 .studio-pane__list pre { background: #111827; color: #e5e7eb; padding: 8px; border-radius: 6px; border: 1px solid #374151; }
+.studio-pane__image-wrapper { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: #0b0b0f; }
+.studio-pane__image { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; }
 </style>
 

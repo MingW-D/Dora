@@ -13,10 +13,20 @@ import type { MessageStream } from '../type.js';
 import { isExternalWebUrl } from '../../../utils/urlGuards';
 
 export class Studio {
+  private messageHandler?: any; // MessageHandler实例
+
   constructor(
     public browserUse: BrowserUseLike,
     public conversationId: string,
-  ) {}
+    messageHandler?: any, // 可选的MessageHandler实例
+  ) {
+    this.messageHandler = messageHandler;
+  }
+
+  // 设置MessageHandler的方法
+  setMessageHandler(messageHandler: any) {
+    this.messageHandler = messageHandler;
+  }
 
   async start(
     action: StudioAction,
@@ -34,17 +44,31 @@ export class Studio {
       payload,
     });
 
-    const message = await caller.message.addMessage({
-      conversationId: this.conversationId,
-      content: '',
-      type: 'TASK',
-      role: 'ASSISTANT',
-      status: 'COMPLETED',
-      roleName: 'Tool',
-      taskId: task.id,
-    });
+    // 如果有MessageHandler实例，使用内容块聚合方式
+    if (this.messageHandler && typeof this.messageHandler.addContentBlock === 'function') {
+      const message = await this.messageHandler.addContentBlock('task', {
+        taskId: task.id,
+        type: action.type,
+        description: action.description,
+        payload: action.payload,
+        status: 'COMPLETED'
+      }, 'Studio Tool');
+      
+      observer.next(message);
+    } else {
+      // 兜底：使用原有方式（避免破坏现有功能）
+      const message = await caller.message.addMessage({
+        conversationId: this.conversationId,
+        content: '',
+        type: 'TASK',
+        role: 'ASSISTANT',
+        status: 'COMPLETED',
+        roleName: 'Tool',
+        taskId: task.id,
+      });
 
-    observer.next(message);
+      observer.next(message);
+    }
   }
 
   async startWithStream(
@@ -60,15 +84,29 @@ export class Studio {
       payload: '',
     });
 
-    const message = await caller.message.addMessage({
-      conversationId: this.conversationId,
-      content: '',
-      type: 'TASK',
-      role: 'ASSISTANT',
-      status: 'PENDING',
-      roleName: 'Tool',
-      taskId: task.id,
-    });
+    let message: any;
+    
+    // 如果有MessageHandler实例，使用内容块聚合方式
+    if (this.messageHandler && typeof this.messageHandler.addContentBlock === 'function') {
+      message = await this.messageHandler.addContentBlock('task', {
+        taskId: task.id,
+        type: action.type,
+        description: action.description,
+        payload: '',
+        status: 'PENDING'
+      }, 'Studio Tool');
+    } else {
+      // 兜底：使用原有方式（避免破坏现有功能）
+      message = await caller.message.addMessage({
+        conversationId: this.conversationId,
+        content: '',
+        type: 'TASK',
+        role: 'ASSISTANT',
+        status: 'PENDING',
+        roleName: 'Tool',
+        taskId: task.id,
+      });
+    }
 
     // Use incrementalContentStream to avoid sending duplicate content
     let accumulatedContent = '';

@@ -255,6 +255,18 @@ export class BaseAgent {
           continue;
         }
 
+        // 发送工具调用开始的消息
+        const toolMessage = await taskRef.createMessage('Tool Agent');
+        toolMessage.content = JSON.stringify({
+          type: 'tool_call',
+          toolName: tool.description || toolName,
+          agentId: this.uuid,
+          status: 'started',
+          parameters: parsedArgs,
+          timestamp: Date.now()
+        });
+        taskRef.observer.next(toolMessage);
+
         taskRef.studio.browserUse.webContentsView.setVisible(false);
         const result = await tool.execute(parsedArgs, taskRef);
 
@@ -273,6 +285,19 @@ export class BaseAgent {
           const content = typeof result === 'string' ? result : JSON.stringify(result);
           this.addToHistory('tool', content, taskRef, undefined, toolCall.id);
           results.push({ toolCall, result });
+          
+          // 发送工具调用完成的消息 - 使用内容块聚合
+          const completedMessage = await taskRef.createMessage('Tool Agent');
+          completedMessage.content = JSON.stringify({
+            type: 'tool_message',
+            toolName: tool.description || toolName,
+            agentId: this.uuid,
+            status: 'completed',
+            parameters: parsedArgs,
+            result: result,
+            timestamp: Date.now()
+          });
+          taskRef.observer.next(completedMessage);
         } else {
           this.addToHistory(
             'tool',
@@ -293,6 +318,19 @@ export class BaseAgent {
           undefined,
           toolCall.id,
         );
+        
+        // 发送工具调用失败的消息
+        const failedMessage = await taskRef.createMessage('Tool Agent');
+        failedMessage.content = JSON.stringify({
+          type: 'tool_message',
+          toolName: toolName,
+          agentId: this.uuid,
+          status: 'failed',
+          parameters: {},
+          error: errorMessage,
+          timestamp: Date.now()
+        });
+        taskRef.observer.next(failedMessage);
       }
     }
 

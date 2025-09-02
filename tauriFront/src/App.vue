@@ -12,14 +12,17 @@ import CodeBlock from './components/CodeBlock.vue';
 import MarkdownRenderer from './components/MarkdownRenderer.vue';
 import MCPToolsManager from './components/MCPToolsManager.vue';
 import StudioPane from './components/StudioPane.vue';
+import ToolCallDisplay from './components/ToolCallDisplay.vue';
+import SubTaskDisplay from './components/SubTaskDisplay.vue';
 import { studioBus, type StudioAction } from './services/studioBus';
 import { parseMessage, isCodeBlock, isMarkdownBlock } from './utils/messageParser';
 import { initWindowControls } from './services/windowControl';
 import cacheManager, { type MessageContentBlock } from './services/cacheManager';
+
 import LogPanel from './components/LogPanel.vue';
 import TaskModeSelector, { type TaskMode } from './components/TaskModeSelector.vue';
-import { multiAgentService } from './services/multiAgentService';
-import { removeFilterPatterns } from './apps/utils/filter-stream';
+
+
 import { tokenCounter, type TokenStats, type TokenUsage } from './apps/utils/token-counter';
 // 设置 store
 const settingsStore = useSettingsStore();
@@ -54,8 +57,7 @@ const messagesContainer = ref<HTMLElement | null>(null);
 // 记忆窗口大小（可根据需要调整，-1为全部记忆，正整数为最近N轮）
 const memoryWindowSize = ref(10); // 例如10轮记忆
 
-// 添加到对话数据部分
-const isGenerating = ref(false);
+
 // 将isGenerating改为Map，以对话ID为键
 const generatingChats = ref(new Map<string, boolean>());
 const isCurrentGenerating = computed(() => !!generatingChats.value.get(currentChatId.value));
@@ -92,6 +94,10 @@ function getCumulativeTotalForMessage(messageId: string): number {
 // 添加编辑消息相关的状态
 const editingMessageId = ref<string | null>(null);
 const editingContent = ref('');
+
+// 计划步骤折叠状态管理
+const collapsedPlanSteps = ref(new Map<string, boolean>()); // messageId -> collapsed state
+const planStepStatuses = ref(new Map<string, Map<number, 'pending' | 'running' | 'completed' | 'failed'>>()); // messageId -> stepId -> status
 
 // 任务处理模式
 const taskMode = ref<TaskMode>('auto'); // 'agent' | 'ask' | 'auto'
@@ -140,7 +146,7 @@ function toggleSidebar() {
 }
 
 // 处理侧边栏拖动调整宽度
-function handleDragStart(e: MouseEvent) {
+function handleDragStart(_e: MouseEvent) {
   isDragging.value = true;
   document.addEventListener('mousemove', handleDragMove);
   document.addEventListener('mouseup', handleDragEnd);
@@ -184,8 +190,8 @@ async function createNewChat() {
   // 切换前，确保未保存的数据落库
   try {
     await cacheManager.forceSyncAll();
-  } catch (e) {
-    console.warn('切换前强制同步失败，将继续创建新对话:', e);
+  } catch (error) {
+    console.warn('切换前强制同步失败，将继续创建新对话:', error);
   }
 
   // 使用缓存管理器创建对话（内部会创建数据库记录）
@@ -335,9 +341,16 @@ async function sendMessage() {
       : userMessage.content;
 
     // 使用缓存管理器更新元数据（由异步同步器落库）
-    cacheManager.updateConversation(currentChatId.value, {
-      metadata: { title: newTitle }
-    });
+    const cachedConv = await cacheManager.getConversation(currentChatId.value);
+    if (cachedConv) {
+      cacheManager.updateConversation(currentChatId.value, {
+        metadata: { 
+          ...cachedConv.metadata,
+          title: newTitle,
+          updatedAt: Date.now()
+        }
+      });
+    }
 
     // 更新本地对话列表
     conversation.title = newTitle;
@@ -451,7 +464,7 @@ async function sendMessage() {
   }
 }
 
-// 生成AI回复（带记忆）- 重构为完全独立的函数
+// 生成AI回复（带记忆）- 直接调用多智能体框架
 async function generateAIResponse(
   question: string,
   aiMessageId: string,
@@ -461,81 +474,173 @@ async function generateAIResponse(
 ): Promise<string> {
   try {
     let fullResponse = '';
-    let hasReceivedContent = false;
 
-    // 准备内容块（流式累积到一个 text 块中）
-    let blocks: MessageContentBlock[] = [{ type: 'text', content: '' }];
+    // 准备内容块存储
+    let blocks: MessageContentBlock[] = [];
 
-    // 监听取消：转发到多智能体服务
+    // 监听取消
     const onAbort = () => {
-      try { multiAgentService.cancelTask(conversationId); } catch {}
+      try { 
+        // ConversionActorAgent内部会处理取消逻辑
+      } catch {}
     };
     abortSignal.addEventListener('abort', onAbort, { once: true });
 
     try {
-      const response = await multiAgentService.processWithMultiAgent(
-        conversationId,
-        question,
-        aiMessageId,
-        (progress) => {
+      // 创建ConversionActorAgent实例，传入现有的消息ID
+      console.log(`[App.vue] Creating ConversionActorAgent with aiMessageId: ${aiMessageId}`);
+      const { ConversionActorAgent } = await import('./apps/agent/conversion-actor-agent');
+      const agent = new ConversionActorAgent(conversationId, abortSignal, aiMessageId);
+      console.log(`[App.vue] ConversionActorAgent created successfully`);
+      
+      // 启动多智能体处理，直接传入任务
+      const observer = await agent.start(question);
+      
+      // 监听流式输出
+      const subscription = observer.subscribe({
+        next: (messageStream) => {
           if (abortSignal.aborted) return;
-          const incoming = progress.content || '';
-          if (!incoming) return;
+          
+          const content = messageStream.content || '';
+          if (!content) return;
 
-          hasReceivedContent = true;
-
-          // 过滤系统标记与��见重复片段
-          const nextChunk = removeFilterPatterns(incoming);
-
-          // 自适应合并：兼容累计/增量/重叠场景，避免重复
-          if (!fullResponse) {
-            fullResponse = nextChunk;
-          } else if (nextChunk === fullResponse) {
-            // 完全重复，忽略
-          } else if (nextChunk.startsWith(fullResponse)) {
-            // 累计模式：直接替换为最新完整内容
-            fullResponse = nextChunk;
-          } else if (fullResponse.includes(nextChunk)) {
-            // 新内容已包含在已有文本中，忽略
-          } else {
-            // 处理重叠追加：仅拼接新增差异部分
-            let overlap = 0;
-            const maxOverlap = Math.min(fullResponse.length, nextChunk.length);
-            for (let k = maxOverlap; k > 0; k--) {
-              if (fullResponse.endsWith(nextChunk.slice(0, k))) {
-                overlap = k;
-                break;
+          // 检查是否是JSON格式的内容块数组
+          try {
+            const parsedContent = JSON.parse(content);
+            if (Array.isArray(parsedContent)) {
+              // 这是聚合的内容块数组，合并到现有blocks中而不是替换
+              // 使用Map来去重和合并相同类型的块
+              const blockMap = new Map<string, any>();
+              
+              // 先添加现有blocks
+              blocks.forEach((block, index) => {
+                const key = block.type + '_' + (block.id || index);
+                blockMap.set(key, block);
+              });
+              
+              // 然后添加新的blocks，相同key的会被覆盖（更新）
+              parsedContent.forEach((block: any, index: number) => {
+                const key = block.type + '_' + (block.id || `new_${Date.now()}_${index}`);
+                blockMap.set(key, { ...block, timestamp: block.timestamp || Date.now() });
+              });
+              
+              // 更新blocks数组，保持时间顺序
+              blocks = Array.from(blockMap.values()).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+              
+              // 提取文本内容用于UI显示
+              const textBlocks = blocks.filter(block => block.type === 'text');
+              fullResponse = textBlocks.map(block => block.content).join('\n');
+            } else if (parsedContent && typeof parsedContent === 'object' && parsedContent.type) {
+              // 这是单个内容块，检查是否已存在相同类型的块
+              const existingIndex = blocks.findIndex(b => 
+                b.type === parsedContent.type && 
+                (b.id === parsedContent.id || (b.type === parsedContent.type && !b.id && !parsedContent.id))
+              );
+              
+              const newBlock = { 
+                ...parsedContent, 
+                timestamp: parsedContent.timestamp || Date.now(),
+                id: parsedContent.id || `block_${blocks.length}_${Date.now()}`
+              };
+              
+              if (existingIndex >= 0) {
+                // 更新现有块
+                blocks[existingIndex] = newBlock;
+              } else {
+                // 添加新块
+                blocks.push(newBlock);
               }
+              
+              if (parsedContent.type === 'text') {
+                // 重新计算完整响应文本
+                const textBlocks = blocks.filter(block => block.type === 'text');
+                fullResponse = textBlocks.map(block => block.content).join('\n');
+              }
+            } else {
+              // 普通文本内容，更新或创建文本块
+              const textBlockIndex = blocks.findIndex(b => b.type === 'text');
+              const textBlock: MessageContentBlock = {
+                type: 'text' as const,
+                content: content,
+                timestamp: Date.now(),
+                id: 'main_text'
+              };
+              
+              if (textBlockIndex >= 0) {
+                blocks[textBlockIndex] = textBlock;
+              } else {
+                blocks.push(textBlock);
+              }
+              fullResponse = content;
             }
-            fullResponse = fullResponse + nextChunk.slice(overlap);
+          } catch {
+            // 解析失败，当作普通文本处理
+            const textBlockIndex = blocks.findIndex(b => b.type === 'text');
+            const textBlock: MessageContentBlock = {
+              type: 'text' as const,
+              content: content,
+              timestamp: Date.now(),
+              id: 'main_text'
+            };
+            
+            if (textBlockIndex >= 0) {
+              blocks[textBlockIndex] = textBlock;
+            } else {
+              blocks.push(textBlock);
+            }
+            fullResponse = content;
           }
 
-          // 更新内容块与消息缓存
-          blocks[0].content = fullResponse;
+          // 更新UI和缓存
           cacheManager.updateContentBlocks(conversationId, aiMessageId, blocks);
-          // 刷新UI但不强制落库
-          updateMessageInConversation(conversationId, aiMessageId, fullResponse, false);
+          // 将完整的内容块数组存储到消息content中，而不仅仅是文本
+          const aggregatedContent = JSON.stringify(blocks);
+          console.log(`[App.vue] Updating message with aggregated content, blocks count: ${blocks.length}, types: ${blocks.map(b => b.type).join(', ')}`);
+          updateMessageInConversation(conversationId, aiMessageId, aggregatedContent, false);
 
           if (generatingChats.value.get(conversationId)) {
             generatingChats.value.set(conversationId, true);
             cacheManager.setGeneratingStatus(conversationId, true);
           }
+        },
+        error: (error) => {
+          console.error('Multi-agent execution error:', error);
+          throw error;
+        },
+        complete: () => {
+          console.log('Multi-agent execution completed');
         }
-      );
+      });
+
+      // 等待完成
+      await new Promise<void>((resolve) => {
+        subscription.add(() => {
+          resolve();
+        });
+        
+        // 处理错误情况
+        if (abortSignal.aborted) {
+          subscription.unsubscribe();
+          resolve();
+        }
+        
+        // 监听用户取消
+        abortSignal.addEventListener('abort', () => {
+          subscription.unsubscribe();
+          resolve();
+        });
+      });
 
       if (abortSignal.aborted) return '';
 
-      if (response.hasError) {
-        throw new Error(response.errorMessage || '任务处理失败');
-      }
-
-      const finalContentRaw = response.content || fullResponse;
-      const finalContent = removeFilterPatterns(finalContentRaw);
-      if (finalContent) {
-        await updateMessageInConversation(conversationId, aiMessageId, finalContent, true);
+      // 最终更新：存储完整的聚合内容块数组
+      const finalAggregatedContent = JSON.stringify(blocks);
+      console.log(`[App.vue] Final update - blocks count: ${blocks.length}, content length: ${finalAggregatedContent.length}`);
+      if (finalAggregatedContent && finalAggregatedContent !== '[]') {
+        await updateMessageInConversation(conversationId, aiMessageId, finalAggregatedContent, true);
       }
       await cacheManager.forceSyncAll();
-      return finalContent;
+      return fullResponse; // 返回文本内容用于错误显示
     } finally {
       abortSignal.removeEventListener('abort', onAbort);
     }
@@ -544,7 +649,7 @@ async function generateAIResponse(
       // 订阅在取消时通常会自行结束，这里返回空字符串以保持调用方逻辑
       return '';
     }
-    console.error('多智能体订阅失败:', error);
+    console.error('多智能体执行失败:', error);
     throw error;
   }
 }
@@ -639,7 +744,16 @@ async function initDatabase() {
 // 在组件挂载时初始化
 onMounted(() => {
   initDatabase();
-  modelStore.loadModelConfigs();
+
+  // 加载模型配置后，根据状态决定是否弹出配置对话框
+  modelStore.loadModelConfigs().then(() => {
+    const noConfig = modelStore.modelConfigs.length === 0;
+    const noApiKey = !modelStore.currentModel?.api_key;
+    if (noConfig || noApiKey) {
+      modelStore.openModelDialog();
+    }
+  });
+
   mcpStore.loadMcpConfigs();
   // 新增：加载设置（包含开发者模式），并在开启时初始化日志拦截
   settingsStore.loadSettings();
@@ -680,6 +794,68 @@ watch(() => currentMessages.value.length, () => {
   scrollToBottom();
 });
 
+// 监听消息变化，处理计划步骤状态更新和自动折叠
+watch(
+  () => currentMessages.value,
+  (newMessages) => {
+    for (const message of newMessages) {
+      if (message.role === 'assistant') {
+        const blocks = getBlocksForMessage(message);
+        
+        // 处理计划步骤块
+        const planStepsBlock = blocks.find(block => block.type === 'plan_steps');
+        if (planStepsBlock && (planStepsBlock as any).metadata?.planData) {
+          const planData = (planStepsBlock as any).metadata.planData;
+          initializePlanStepStatuses(message.id, planData);
+        }
+        
+        // 处理子任务状态更新
+        blocks.forEach(block => {
+          if (block.type === 'subtask_status') {
+            const content = (block as any).content;
+            if (content && typeof content === 'object') {
+              const stepId = content.subtaskId;
+              const status = content.status;
+              
+              // 查找对应的计划步骤消息
+              const planMessage = newMessages.find(msg => 
+                getBlocksForMessage(msg).some(b => b.type === 'plan_steps')
+              );
+              
+              if (planMessage && stepId) {
+                let mappedStatus: 'pending' | 'running' | 'completed' | 'failed' = 'pending';
+                switch (status) {
+                  case 'running': mappedStatus = 'running'; break;
+                  case 'completed': mappedStatus = 'completed'; break;
+                  case 'failed': mappedStatus = 'failed'; break;
+                  default: mappedStatus = 'pending';
+                }
+                updatePlanStepStatus(planMessage.id, stepId, mappedStatus);
+              }
+            }
+          }
+          
+          // 任务完成时自动折叠计划
+          if (block.type === 'final_result') {
+            // 查找对应的计划步骤消息并折叠
+            const planMessage = newMessages.find(msg => 
+              getBlocksForMessage(msg).some(b => b.type === 'plan_steps')
+            );
+            
+            if (planMessage) {
+              // 延迟折叠，让用户看到最终结果
+              setTimeout(() => {
+                collapsedPlanSteps.value.set(planMessage.id, true);
+              }, 2000);
+            }
+          }
+        });
+      }
+    }
+  },
+  { deep: true }
+);
+
 onUnmounted(() => {
   try { 
     window.removeEventListener('agent-token-usage', tokenUsageListener as EventListener); 
@@ -693,15 +869,7 @@ onUnmounted(() => {
   } catch {}
 });
 
-// 复制消息内容
-async function copyMessageContent(content: string) {
-  try {
-    await navigator.clipboard.writeText(content);
-    // 可以添加一个提示，表示复制成功
-  } catch (error) {
-    console.error('复制失败:', error);
-  }
-}
+
 
 // 使用内容块渲染与复制的辅助
 const cachedContentBlocks = computed(() => {
@@ -719,7 +887,11 @@ function getBlocksForMessage(message: Message): MessageContentBlock[] {
     if (Array.isArray(data)) {
       return data as MessageContentBlock[];
     }
-  } catch (e) {
+    // 处理单个工具消息或其他类型的消息
+    if (data && typeof data === 'object' && data.type) {
+      return [data as MessageContentBlock];
+    }
+  } catch {
     // ignore
   }
   return [{
@@ -729,9 +901,11 @@ function getBlocksForMessage(message: Message): MessageContentBlock[] {
   }];
 }
 
-async function copyMessage(message: Message) {
+
+
+async function copyMessage(msg: Message) {
   try {
-    const blocks = getBlocksForMessage(message);
+    const blocks = getBlocksForMessage(msg);
     const plain = blocks.map((b) => {
       switch (b.type) {
         case 'text':
@@ -750,6 +924,10 @@ async function copyMessage(message: Message) {
           return typeof (b as any).content === 'string'
             ? (b as any).content
             : JSON.stringify((b as any).content, null, 2);
+        case 'task':
+          return `[任务] ` + (typeof (b as any).content === 'object'
+            ? ((b as any).content?.description ?? '')
+            : String((b as any).content ?? ''));
         default:
           return String((b as any).content || '');
       }
@@ -758,6 +936,110 @@ async function copyMessage(message: Message) {
     await navigator.clipboard.writeText(plain);
   } catch (error) {
     console.error('复制失败:', error);
+  }
+}
+
+function previewTask(_msg: Message, cblock: MessageContentBlock) {
+  try {
+    const content: any = (cblock as any)?.content ?? {};
+    studioBus.preview({
+      type: content.type,
+      description: content.description || '',
+      payload: content.payload,
+    });
+    isStudioCollapsed.value = false;
+  } catch (e) {
+    console.error('预览任务失败:', e);
+  }
+}
+
+// 计划步骤管理函数
+function togglePlanStepsCollapse(messageId: string) {
+  const currentState = collapsedPlanSteps.value.get(messageId) || false;
+  collapsedPlanSteps.value.set(messageId, !currentState);
+}
+
+function isPlanStepsCollapsed(messageId: string): boolean {
+  return collapsedPlanSteps.value.get(messageId) || false;
+}
+
+function initializePlanStepStatuses(messageId: string, planData: any[]) {
+  if (!planStepStatuses.value.has(messageId)) {
+    const statusMap = new Map<number, 'pending' | 'running' | 'completed' | 'failed'>();
+    planData.forEach(task => {
+      const status = task.completed ? 'completed' : 'pending';
+      statusMap.set(task.id, status);
+    });
+    planStepStatuses.value.set(messageId, statusMap);
+  }
+}
+
+function updatePlanStepStatus(messageId: string, stepId: number, status: 'pending' | 'running' | 'completed' | 'failed') {
+  if (!planStepStatuses.value.has(messageId)) {
+    planStepStatuses.value.set(messageId, new Map());
+  }
+  planStepStatuses.value.get(messageId)!.set(stepId, status);
+}
+
+function getPlanStepStatus(messageId: string, stepId: number): 'pending' | 'running' | 'completed' | 'failed' {
+  return planStepStatuses.value.get(messageId)?.get(stepId) || 'pending';
+}
+
+function getStatusIcon(status: 'pending' | 'running' | 'completed' | 'failed'): string {
+  switch (status) {
+    case 'pending': return '⏳';
+    case 'running': return '🔄';
+    case 'completed': return '✅';
+    case 'failed': return '❌';
+    default: return '⏳';
+  }
+}
+
+function previewPlanSteps(_msg: Message, cblock: MessageContentBlock) {
+  try {
+    const content: any = (cblock as any)?.content;
+    const metadata: any = (cblock as any)?.metadata;
+    
+    console.log('预览计划步骤 - cblock:', cblock);
+    console.log('预览计划步骤 - content:', content);
+    console.log('预览计划步骤 - metadata:', metadata);
+    
+    // 生成 todos.md 格式的内容
+    let todosContent = '# Task Plan\n\n';
+    todosContent += `Total Steps: ${metadata?.totalSteps || (Array.isArray(content) ? content.length : 'N/A')}\n\n`;
+    todosContent += '## Todo List\n\n';
+    
+    if (Array.isArray(content)) {
+      content.forEach((step: string, index: number) => {
+        todosContent += `- [ ] ${index + 1}. ${step}\n`;
+      });
+    }
+    
+    // 如果有详细的计划数据，添加依赖关系信息
+    if (metadata?.planData && Array.isArray(metadata.planData)) {
+      todosContent += '\n## Detailed Plan\n\n';
+      metadata.planData.forEach((task: any, index: number) => {
+        todosContent += `### Task ${task.id || (index + 1)}\n`;
+        todosContent += `**Description:** ${task.description}\n\n`;
+        if (task.dependencies && task.dependencies.length > 0) {
+          todosContent += `**Dependencies:** ${task.dependencies.join(', ')}\n\n`;
+        }
+        todosContent += `**Status:** ${task.completed ? '✅ Completed' : '⏳ Pending'}\n\n`;
+        if (task.result) {
+          todosContent += `**Result:** ${task.result}\n\n`;
+        }
+        todosContent += '---\n\n';
+      });
+    }
+    
+    studioBus.preview({
+      type: 'editor',
+      description: 'Task Plan - todos.md',
+      payload: todosContent
+    });
+    isStudioCollapsed.value = false;
+  } catch (e) {
+    console.error('预览计划步骤失败:', e);
   }
 }
 
@@ -1033,27 +1315,104 @@ async function saveAndResendMessage() {
               <MarkdownRenderer v-else-if="isMarkdownBlock(sub)" :content="sub.content" />
             </template>
           </template>
-          <div v-else-if="cblock.type === 'tool_call'" class="tool-call-block">
-            🔧 工具调用：{{ cblock.content }}
-          </div>
-          <div v-else-if="cblock.type === 'tool_message'" class="tool-message-block">
-            <pre>{{ typeof cblock.content === 'string' ? cblock.content : JSON.stringify(cblock.content, null, 2) }}</pre>
-          </div>
-          <div v-else-if="cblock.type === 'url_links'" class="url-links-block">
-            <div v-for="(link, lidx) in (Array.isArray(cblock.content) ? cblock.content : [])" :key="lidx">
-              <a :href="link" target="_blank" rel="noopener noreferrer">{{ link }}</a>
+          <template v-else-if="cblock.type === 'tool_call'">
+            <div class="tool-call-block">
+              <div class="tool-call-hint">
+                <span class="hint-icon">💡</span>
+                <span class="hint-text">正在调用工具：{{ cblock.content }}</span>
+              </div>
             </div>
-          </div>
-          <div v-else-if="cblock.type === 'plan_steps'" class="plan-steps-block">
-            <ol>
-              <li v-for="(step, pidx) in (Array.isArray(cblock.content) ? cblock.content : [cblock.content])" :key="pidx">
-                {{ step }}
-              </li>
-            </ol>
-          </div>
-          <div v-else-if="cblock.type === 'step_result'" class="step-result-block">
-            <pre>{{ typeof cblock.content === 'string' ? cblock.content : JSON.stringify(cblock.content, null, 2) }}</pre>
-          </div>
+          </template>
+          <template v-else-if="cblock.type === 'tool_message'">
+            <ToolCallDisplay 
+              v-if="typeof cblock.content === 'object' && cblock.content.toolName"
+              :tool-message="cblock.content"
+            />
+            <div v-else class="tool-message-block">
+              <pre>{{ typeof cblock.content === 'string' ? cblock.content : JSON.stringify(cblock.content, null, 2) }}</pre>
+            </div>
+          </template>
+          <template v-else-if="cblock.type === 'url_links'">
+            <div class="url-links-block">
+              <div v-for="(link, lidx) in (Array.isArray(cblock.content) ? cblock.content : [])" :key="lidx">
+                <a :href="link" target="_blank" rel="noopener noreferrer">{{ link }}</a>
+              </div>
+            </div>
+          </template>
+          <template v-else-if="cblock.type === 'plan_steps'">
+            <div class="plan-steps-block" :class="{ collapsed: isPlanStepsCollapsed(message.id) }">
+              <div class="plan-steps-header" @click.stop="togglePlanStepsCollapse(message.id)">
+                <span class="plan-icon">📋</span>
+                <span class="plan-title">To-dos</span>
+                <span class="plan-collapse-icon">{{ isPlanStepsCollapsed(message.id) ? '▶' : '▼' }}</span>
+              </div>
+              <div class="plan-steps-content" v-show="!isPlanStepsCollapsed(message.id)">
+                <ol>
+                  <li 
+                    v-for="(step, pidx) in (Array.isArray(cblock.content) ? cblock.content : [cblock.content])" 
+                    :key="pidx"
+                    class="plan-step-item"
+                    @click="previewPlanSteps(message, cblock)"
+                  >
+                    <span 
+                      class="step-status-icon" 
+                      :class="`status-${getPlanStepStatus(message.id, pidx + 1)}`"
+                    >
+                      {{ getStatusIcon(getPlanStepStatus(message.id, pidx + 1)) }}
+                    </span>
+                    <span class="step-content">{{ step }}</span>
+                  </li>
+                </ol>
+                <div class="plan-hint">点击步骤查看详细 todos.md</div>
+              </div>
+            </div>
+          </template>
+          <template v-else-if="cblock.type === 'step_result'">
+            <div class="step-result-block">
+              <pre>{{ typeof cblock.content === 'string' ? cblock.content : JSON.stringify(cblock.content, null, 2) }}</pre>
+            </div>
+          </template>
+          <template v-else-if="cblock.type === 'subtask_status'">
+            <SubTaskDisplay
+              v-if="typeof cblock.content === 'object'"
+              :subtask-number="(cblock.content as any).subtaskId"
+              :subtask-description="(cblock.content as any).subtaskDescription"
+              :status="(cblock.content as any).status"
+            >
+              <div class="subtask-progress">
+                <span>进度: {{ (cblock.content as any).completedSubtasks }}/{{ (cblock.content as any).totalSubtasks }}</span>
+                <span v-if="(cblock.content as any).status === 'completed'" class="success-icon">✅</span>
+                <span v-else-if="(cblock.content as any).status === 'failed'" class="fail-icon">❌</span>
+                <span v-else class="running-icon">⏳</span>
+              </div>
+            </SubTaskDisplay>
+          </template>
+          <template v-else-if="cblock.type === 'final_result'">
+            <div class="final-result-block">
+              <div class="final-result-header">
+                <span class="result-icon">🎯</span>
+                <span class="result-title">任务最终结果</span>
+                <span class="result-status" :class="{ complete: (cblock.content as any).isMainTaskComplete }">
+                  {{ (cblock.content as any).isMainTaskComplete ? '任务完成' : '部分完成' }}
+                  ({{ (cblock.content as any).completedSubtasks }}/{{ (cblock.content as any).totalSubtasks }} 子任务)
+                </span>
+              </div>
+              <div class="final-result-content">
+                <MarkdownRenderer :content="(cblock.content as any).content" />
+              </div>
+            </div>
+          </template>
+          <template v-else-if="cblock.type === 'task'">
+            <div class="task-block">
+              <div class="task-header">🧩 任务</div>
+              <div class="task-body">
+                <div class="task-desc">
+                  {{ typeof cblock.content === 'object' ? (cblock.content.description || '[无描述]') : String(cblock.content) }}
+                </div>
+                <button class="task-preview-btn" @click="previewTask(message, cblock)">预览</button>
+              </div>
+            </div>
+          </template>
         </template>
       </div>
       <!-- 加载动画，仅当是最后一条消息且是AI角色且内容为空且正在生成时显示 -->
@@ -2303,5 +2662,356 @@ async function saveAndResendMessage() {
 .token-total {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* 工具调用提示样式 */
+.tool-call-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background-color: #f0f9ff;
+  border-left: 3px solid #3b82f6;
+  border-radius: 4px;
+  margin: 8px 0;
+}
+
+.hint-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.hint-text {
+  color: #1e40af;
+  font-weight: 500;
+  font-size: 14px;
+}
+
+/* 消息块样式 */
+.tool-message-block,
+.url-links-block,
+.plan-steps-block,
+.step-result-block {
+  background-color: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 12px;
+  margin: 8px 0;
+  font-size: 14px;
+  overflow-x: auto;
+}
+
+/* 可点击块样式 */
+.clickable-block {
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.clickable-block:hover {
+  background-color: #f3f4f6;
+  border-color: #3b82f6;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.1);
+  transform: translateY(-1px);
+}
+
+/* 计划步骤特殊样式 */
+.plan-steps-block {
+  background: linear-gradient(135deg, #f8fafc, #f1f5f9);
+  border: 2px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+
+.plan-steps-block.collapsed {
+  border-color: #94a3b8;
+}
+
+.plan-steps-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(59, 130, 246, 0.05);
+  border-bottom: 1px solid #e2e8f0;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.plan-steps-header:hover {
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.plan-icon {
+  font-size: 18px;
+}
+
+.plan-title {
+  font-weight: 600;
+  color: #1e293b;
+  font-size: 15px;
+  flex: 1;
+}
+
+.plan-collapse-icon {
+  font-size: 12px;
+  color: #64748b;
+  transition: transform 0.2s;
+}
+
+.plan-steps-content {
+  padding: 12px 16px;
+  animation: fadeIn 0.3s ease;
+}
+
+.plan-steps-content ol {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.plan-step-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border-left: 3px solid transparent;
+}
+
+.plan-step-item:hover {
+  background: rgba(59, 130, 246, 0.08);
+  border-left-color: #3b82f6;
+}
+
+.step-status-icon {
+  font-size: 16px;
+  min-width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s;
+}
+
+.step-status-icon.status-pending {
+  opacity: 0.7;
+}
+
+.step-status-icon.status-running {
+  animation: pulse 1.5s infinite;
+  color: #3b82f6;
+}
+
+.step-status-icon.status-completed {
+  color: #10b981;
+}
+
+.step-status-icon.status-failed {
+  color: #ef4444;
+}
+
+.step-content {
+  flex: 1;
+  line-height: 1.5;
+  color: #374151;
+}
+
+.plan-hint {
+  font-size: 11px;
+  color: #94a3b8;
+  text-align: center;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid #f1f5f9;
+  opacity: 0.8;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    max-height: 500px;
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.1);
+  }
+}
+
+.tool-message-block pre,
+.step-result-block pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.task-block {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 8px 0;
+  background-color: #ffffff;
+}
+
+.task-header {
+  padding: 12px 16px;
+  background-color: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+  font-weight: 600;
+  color: #374151;
+}
+
+.task-body {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.task-desc {
+  flex: 1;
+  color: #4b5563;
+}
+
+.task-preview-btn {
+  padding: 6px 12px;
+  background-color: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.task-preview-btn:hover {
+  background-color: #2563eb;
+}
+
+/* 子任务进度样式 */
+.subtask-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  color: #4b5563;
+}
+
+.success-icon {
+  color: #10b981;
+  font-size: 16px;
+}
+
+.fail-icon {
+  color: #ef4444;
+  font-size: 16px;
+}
+
+.running-icon {
+  color: #3b82f6;
+  font-size: 16px;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* 最终结果样式 */
+.final-result-block {
+  border: 2px solid #3b82f6;
+  border-radius: 12px;
+  margin: 16px 0;
+  overflow: hidden;
+  background-color: #ffffff;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.1);
+}
+
+.final-result-header {
+  padding: 16px;
+  background-color: #eff6ff;
+  border-bottom: 1px solid #dbeafe;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.result-icon {
+  font-size: 24px;
+}
+
+.result-title {
+  font-weight: 600;
+  font-size: 16px;
+  color: #1e40af;
+  flex: 1;
+}
+
+.result-status {
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 13px;
+  background-color: #fbbf24;
+  color: #92400e;
+}
+
+.result-status.complete {
+  background-color: #34d399;
+  color: #064e3b;
+}
+
+.final-result-content {
+  padding: 20px;
+  color: #1f2937;
+  line-height: 1.8;
+}
+
+.final-result-content p {
+  margin-bottom: 12px;
+}
+
+.final-result-content ul,
+.final-result-content ol {
+  margin-left: 20px;
+  margin-bottom: 12px;
+}
+
+.final-result-content li {
+  margin-bottom: 6px;
+}
+
+.final-result-content code {
+  background-color: #f3f4f6;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+.final-result-content pre {
+  background-color: #1f2937;
+  color: #f9fafb;
+  padding: 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 12px 0;
 }
 </style>
