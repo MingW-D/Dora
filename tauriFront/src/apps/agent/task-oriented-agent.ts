@@ -1,4 +1,4 @@
-import { lastValueFrom } from 'rxjs';
+import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import {
   executorAgentSystemPrompt,
   plannerAgentSystemPrompt,
@@ -8,6 +8,7 @@ import type { SpecializedToolAgent } from '../toolkits/types.js';
 import { BaseAgent } from './base-agent.js';
 import { DialogueAgent } from './dialogue-agent.js';
 import type { AgentTaskRef } from './type.js';
+import { tools } from './tools.js';
 
 type Parameters = {
   task: string;
@@ -25,9 +26,9 @@ type SubTask = {
 };
 
 export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent {
-  override readonly name = 'Task-Oriented-Agent';
+  override readonly name = 'building To-dos';
   readonly description =
-    'An agent that can break down complex tasks into subtasks and complete them step by step.';
+    'building To-dos.';
   readonly parameters = {
     type: 'object',
     properties: {
@@ -44,6 +45,7 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
 
   private plannerAgent = new BaseAgent({
     temperature: 0.2,
+    tools
   });
 
   private executorAgent = new DialogueAgent();
@@ -77,6 +79,7 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
       return 'Task has been aborted.';
     }
 
+    console.log('query', query);
     // 步骤1: 分解任务
     const subTasks = await this.decomposeTasks(query.task, taskRef);
     if (!subTasks || subTasks.length === 0) {
@@ -250,7 +253,9 @@ Output a list of subtasks in JSON format.`;
       },
     });
 
-    const content = await lastValueFrom(completion.contentStream);
+    const content = await lastValueFrom(
+      completion.contentStream.pipe(defaultIfEmpty(''))
+    );
 
     try {
       // 尝试从回复中提取JSON
@@ -488,24 +493,26 @@ If all requirements are fully met, output "VALIDATED: true", otherwise output "V
       };
     }
 
-    const messageModel = await taskRef.createMessage('Task');
-    messageModel.messageType = 'validation';
-    messageModel.metadata = {
-      subtaskId: subTask.id,
-      subtaskDescription: subTask.description
-    };
-    completion.contentStream.subscribe({
-      next: (chunk) => {
-        messageModel.content = chunk;
-        taskRef.observer.next(messageModel);
-      },
-      complete() {
-        taskRef.completeMessage(messageModel);
-        taskRef.observer.next(messageModel);
-      },
-    });
+    // const messageModel = await taskRef.createMessage('Task');
+    // messageModel.messageType = 'validation';
+    // messageModel.metadata = {
+    //   subtaskId: subTask.id,
+    //   subtaskDescription: subTask.description
+    // };
+    // completion.contentStream.subscribe({
+    //   next: (chunk) => {
+    //     messageModel.content = chunk;
+    //     taskRef.observer.next(messageModel);
+    //   },
+    //   complete() {
+    //     taskRef.completeMessage(messageModel);
+    //     taskRef.observer.next(messageModel);
+    //   },
+    // });
 
-    const content = await lastValueFrom(completion.contentStream);
+    const content = await lastValueFrom(
+      completion.contentStream.pipe(defaultIfEmpty(''))
+    );
 
     const isValid = content.toLowerCase().includes('validated: true');
     return {
@@ -553,6 +560,7 @@ If all requirements are fully met, output "VALIDATED: true", otherwise output "V
 
     const completion = await this.plannerAgent.run(prompt, taskRef);
     if (!completion) {
+      console.error('Unable to generate final summary.');
       return 'Unable to generate final summary.';
     }
 
@@ -586,6 +594,8 @@ If all requirements are fully met, output "VALIDATED: true", otherwise output "V
       taskRef.observer,
     );
 
-    return await lastValueFrom(completion.contentStream);
+    return await lastValueFrom(
+      completion.contentStream.pipe(defaultIfEmpty(''))
+    );
   }
 }

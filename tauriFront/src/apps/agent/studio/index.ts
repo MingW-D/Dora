@@ -1,7 +1,7 @@
 import type { BrowserUseLike } from '../../tauri-adapters/browser-use';
 // 本地定义 StudioAction，避免外部依赖
 export type StudioAction = {
-  type: 'openUrl' | 'searchResults' | 'editor' | 'openFolder' | 'openFile' | string;
+  type: 'openUrl' | 'searchResults' | 'editor' | 'openFolder' | 'openFile' | 'htmlReport' | string;
   description: string;
   payload: any;
 };
@@ -35,7 +35,17 @@ export class Studio {
   ) {
     await TauriWindowManager.getInstance().initialize();
 
-    const payload = JSON.stringify(action.payload);
+    const payload = JSON.stringify(
+      action.type === 'htmlReport'
+        ? {
+            title: action.payload?.title,
+            fileName: action.payload?.fileName,
+            contentLength: typeof action.payload?.htmlContent === 'string'
+              ? action.payload.htmlContent.length
+              : 0,
+          }
+        : action.payload,
+    );
     this.preview(action);
 
     const task = await caller.task.createTask({
@@ -166,6 +176,7 @@ export class Studio {
       case 'editor':
       case 'openFolder':
       case 'openFile':
+      case 'htmlReport':
         await TauriWindowManager.getInstance().sendMessage('studio', action);
         break;
     }

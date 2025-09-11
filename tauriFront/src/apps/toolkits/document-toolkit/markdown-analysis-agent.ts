@@ -4,7 +4,7 @@ import { fetch } from '@tauri-apps/plugin-http';
 import yaml from 'js-yaml';
 import { marked } from 'marked';
 import type { Token } from 'marked';
-import { lastValueFrom } from 'rxjs';
+import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import { BaseAgent } from '../../agent/base-agent.js';
 import type { AgentTaskRef } from '../../agent/type.js';
 import type { SpecializedToolAgent } from '../types.js';
@@ -217,6 +217,8 @@ export class MarkdownAnalysisAgent extends BaseAgent implements SpecializedToolA
       throw new Error('Unable to analyze Markdown content');
     }
 
-    return await lastValueFrom(result?.contentStream);
+    return await lastValueFrom(
+      result?.contentStream?.pipe(defaultIfEmpty('')) || Promise.resolve('')
+    );
   }
 }

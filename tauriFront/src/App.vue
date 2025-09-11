@@ -12,7 +12,7 @@ import CodeBlock from './components/CodeBlock.vue';
 import MarkdownRenderer from './components/MarkdownRenderer.vue';
 import MCPToolsManager from './components/MCPToolsManager.vue';
 import StudioPane from './components/StudioPane.vue';
-import ToolCallDisplay from './components/ToolCallDisplay.vue';
+
 import SubTaskDisplay from './components/SubTaskDisplay.vue';
 import { studioBus, type StudioAction } from './services/studioBus';
 import { parseMessage, isCodeBlock, isMarkdownBlock } from './utils/messageParser';
@@ -98,6 +98,13 @@ const editingContent = ref('');
 // 计划步骤折叠状态管理
 const collapsedPlanSteps = ref(new Map<string, boolean>()); // messageId -> collapsed state
 const planStepStatuses = ref(new Map<string, Map<number, 'pending' | 'running' | 'completed' | 'failed'>>()); // messageId -> stepId -> status
+
+
+// User Agent消息折叠状态管理
+const collapsedUserAgents = ref(new Map<string, boolean>()); // blockId -> collapsed state
+
+// Assistant Agent消息折叠状态管理
+const collapsedAssistantAgents = ref(new Map<string, boolean>()); // blockId -> collapsed state
 
 // 任务处理模式
 const taskMode = ref<TaskMode>('auto'); // 'agent' | 'ask' | 'auto'
@@ -518,9 +525,50 @@ async function generateAIResponse(
                 blockMap.set(key, block);
               });
               
-              // 然后添加新的blocks，相同key的会被覆盖（更新）
+              // 然后添加新的blocks
               parsedContent.forEach((block: any, index: number) => {
-                const key = block.type + '_' + (block.id || `new_${Date.now()}_${index}`);
+                // 过滤掉editor类型的消息块，不保存到blocks中
+                if (block.type === 'editor') {
+                  return;
+                }
+                
+                let key: string;
+                if (block.type === 'text') {
+                  const trimmedContent = String(block.content || '').trim();
+                  if (!trimmedContent) return; // 跳过空内容
+                  
+                  // 检查是否有重复的文本内容
+                  const existingTextBlocks = Array.from(blockMap.values()).filter(b => b.type === 'text');
+                  const isDuplicate = existingTextBlocks.some(existingBlock => {
+                    const existingContent = String(existingBlock.content || '').trim();
+                    
+                    // 完全相同
+                    if (existingContent === trimmedContent) return true;
+                    
+                    // 新内容是已有内容的子串（已有内容更完整）
+                    if (existingContent.includes(trimmedContent) && trimmedContent.length < existingContent.length) {
+                      return true;
+                    }
+                    
+                    // 已有内容是新内容的子串，更新为更完整的版本
+                    if (trimmedContent.includes(existingContent) && trimmedContent.length > existingContent.length) {
+                      existingBlock.content = trimmedContent;
+                      return true;
+                    }
+                    
+                    return false;
+                  });
+                  
+                  if (isDuplicate) return; // 跳过重复内容
+                  
+                  // 文本类型使用唯一的key
+                  key = `text_${Date.now()}_${index}_${Math.random().toString(36).substr(2, 9)}`;
+                  block.content = trimmedContent; // 使用处理过的内容
+                } else {
+                  // 非文本类型使用原有逻辑，相同key的会被覆盖（更新）
+                  key = block.type + '_' + (block.id || `new_${Date.now()}_${index}`);
+                }
+                
                 blockMap.set(key, { ...block, timestamp: block.timestamp || Date.now() });
               });
               
@@ -531,11 +579,10 @@ async function generateAIResponse(
               const textBlocks = blocks.filter(block => block.type === 'text');
               fullResponse = textBlocks.map(block => block.content).join('\n');
             } else if (parsedContent && typeof parsedContent === 'object' && parsedContent.type) {
-              // 这是单个内容块，检查是否已存在相同类型的块
-              const existingIndex = blocks.findIndex(b => 
-                b.type === parsedContent.type && 
-                (b.id === parsedContent.id || (b.type === parsedContent.type && !b.id && !parsedContent.id))
-              );
+              // 过滤掉editor类型的消息块，不保存到blocks中
+              if (parsedContent.type === 'editor') {
+                return;
+              }
               
               const newBlock = { 
                 ...parsedContent, 
@@ -543,52 +590,149 @@ async function generateAIResponse(
                 id: parsedContent.id || `block_${blocks.length}_${Date.now()}`
               };
               
-              if (existingIndex >= 0) {
-                // 更新现有块
-                blocks[existingIndex] = newBlock;
-              } else {
-                // 添加新块
-                blocks.push(newBlock);
-              }
-              
               if (parsedContent.type === 'text') {
+                // 文本类型检查重复后创建新块
+                const trimmedContent = String(newBlock.content || '').trim();
+                if (!trimmedContent) return; // 跳过空内容
+                
+                // 检查是否有重复或包含关系的文本块
+                const existingTextBlocks = blocks.filter(block => block.type === 'text');
+                const isDuplicate = existingTextBlocks.some(block => {
+                  const existingContent = String(block.content || '').trim();
+                  
+                  // 完全相同
+                  if (existingContent === trimmedContent) return true;
+                  
+                  // 新内容是已有内容的子串（已有内容更完整）
+                  if (existingContent.includes(trimmedContent) && trimmedContent.length < existingContent.length) {
+                    return true;
+                  }
+                  
+                  // 已有内容是新内容的子串，且时间相近（10秒内），可能是增量更新
+                  const timeDiff = Date.now() - (block.timestamp || 0);
+                  if (trimmedContent.includes(existingContent) && timeDiff < 10000) {
+                    // 更新这个块的内容为更完整的版本
+                    block.content = trimmedContent;
+                    block.timestamp = Date.now(); // 更新时间戳
+                    return true;
+                  }
+                  
+                  return false;
+                });
+                
+                if (!isDuplicate) {
+                  newBlock.id = `text_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                  newBlock.content = trimmedContent;
+                  blocks.push(newBlock);
+                }
+                
                 // 重新计算完整响应文本
                 const textBlocks = blocks.filter(block => block.type === 'text');
                 fullResponse = textBlocks.map(block => block.content).join('\n');
+              } else {
+                // 非文本类型的块，检查是否已存在相同类型的块
+                const existingIndex = blocks.findIndex(b => 
+                  b.type === parsedContent.type && 
+                  (b.id === parsedContent.id || (b.type === parsedContent.type && !b.id && !parsedContent.id))
+                );
+                
+                if (existingIndex >= 0) {
+                  // 更新现有块
+                  blocks[existingIndex] = newBlock;
+                } else {
+                  // 添加新块
+                  blocks.push(newBlock);
+                }
               }
             } else {
-              // 普通文本内容，更新或创建文本块
-              const textBlockIndex = blocks.findIndex(b => b.type === 'text');
-              const textBlock: MessageContentBlock = {
-                type: 'text' as const,
-                content: content,
-                timestamp: Date.now(),
-                id: 'main_text'
-              };
+              // 普通文本内容，检查是否与已有文本块重复
+              const trimmedContent = content.trim();
+              if (!trimmedContent) return; // 跳过空内容
               
-              if (textBlockIndex >= 0) {
-                blocks[textBlockIndex] = textBlock;
-              } else {
+              // 检查是否有重复或包含关系的文本块
+              const existingTextBlocks = blocks.filter(block => block.type === 'text');
+              const isDuplicate = existingTextBlocks.some(block => {
+                const existingContent = String(block.content || '').trim();
+                
+                // 完全相同
+                if (existingContent === trimmedContent) return true;
+                
+                // 新内容是已有内容的子串（已有内容更完整）
+                if (existingContent.includes(trimmedContent) && trimmedContent.length < existingContent.length) {
+                  return true;
+                }
+                
+                // 已有内容是新内容的子串，且时间相近（10秒内），可能是增量更新
+                const timeDiff = Date.now() - (block.timestamp || 0);
+                if (trimmedContent.includes(existingContent) && timeDiff < 10000) {
+                  // 更新这个块的内容为更完整的版本
+                  block.content = trimmedContent;
+                  block.timestamp = Date.now(); // 更新时间戳
+                  return true;
+                }
+                
+                return false;
+              });
+              
+              if (!isDuplicate) {
+                const textBlock: MessageContentBlock = {
+                  type: 'text' as const,
+                  content: trimmedContent,
+                  timestamp: Date.now(),
+                  id: `text_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+                };
+                
                 blocks.push(textBlock);
               }
-              fullResponse = content;
+              
+              // 重新计算完整响应文本（合并所有文本块）
+              const textBlocks = blocks.filter(block => block.type === 'text');
+              fullResponse = textBlocks.map(block => block.content).join('\n');
             }
           } catch {
-            // 解析失败，当作普通文本处理
-            const textBlockIndex = blocks.findIndex(b => b.type === 'text');
-            const textBlock: MessageContentBlock = {
-              type: 'text' as const,
-              content: content,
-              timestamp: Date.now(),
-              id: 'main_text'
-            };
+            // 解析失败，当作普通文本处理，检查重复后创建新文本块
+            const trimmedContent = content.trim();
+            if (!trimmedContent) return; // 跳过空内容
             
-            if (textBlockIndex >= 0) {
-              blocks[textBlockIndex] = textBlock;
-            } else {
+            // 检查是否有重复或包含关系的文本块
+            const existingTextBlocks = blocks.filter(block => block.type === 'text');
+            const isDuplicate = existingTextBlocks.some(block => {
+              const existingContent = String(block.content || '').trim();
+              
+              // 完全相同
+              if (existingContent === trimmedContent) return true;
+              
+              // 新内容是已有内容的子串（已有内容更完整）
+              if (existingContent.includes(trimmedContent) && trimmedContent.length < existingContent.length) {
+                return true;
+              }
+              
+              // 已有内容是新内容的子串，且时间相近（10秒内），可能是增量更新
+              const timeDiff = Date.now() - (block.timestamp || 0);
+              if (trimmedContent.includes(existingContent) && timeDiff < 10000) {
+                // 更新这个块的内容为更完整的版本
+                block.content = trimmedContent;
+                block.timestamp = Date.now(); // 更新时间戳
+                return true;
+              }
+              
+              return false;
+            });
+            
+            if (!isDuplicate) {
+              const textBlock: MessageContentBlock = {
+                type: 'text' as const,
+                content: trimmedContent,
+                timestamp: Date.now(),
+                id: `text_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+              };
+              
               blocks.push(textBlock);
             }
-            fullResponse = content;
+            
+            // 重新计算完整响应文本（合并所有文本块）
+            const textBlocks = blocks.filter(block => block.type === 'text');
+            fullResponse = textBlocks.map(block => block.content).join('\n');
           }
 
           // 更新UI和缓存
@@ -835,6 +979,37 @@ watch(
             }
           }
           
+          
+          // User Agent消息完成时自动折叠
+          if (block.type === 'user_agent') {
+            const blockId = (block as any).id || `user_agent_${Date.now()}`;
+            const content = String(block.content || '');
+            
+            // 检查是否有自动折叠标记
+            if ((block as any).autoCollapse) {
+              // 有自动折叠标记，立即折叠
+              autoCollapseUserAgent(blockId, 1000); // 1秒后自动折叠
+            } else if (content.length > 10 && !generatingChats.value.get(currentChatId.value)) {
+              // 检查内容是否完整（简单判断：内容长度大于10且不是正在生成中）
+              autoCollapseUserAgent(blockId, 3000); // 3秒后自动折叠
+            }
+          }
+          
+          // Assistant Agent消息完成时自动折叠
+          if (block.type === 'assistant_agent') {
+            const blockId = (block as any).id || `assistant_agent_${Date.now()}`;
+            const content = String(block.content || '');
+            
+            // 检查是否有自动折叠标记
+            if ((block as any).autoCollapse) {
+              // 有自动折叠标记，立即折叠
+              autoCollapseAssistantAgent(blockId, 1000); // 1秒后自动折叠
+            } else if (content.length > 10 && !generatingChats.value.get(currentChatId.value)) {
+              // 检查内容是否完整（简单判断：内容长度大于10且不是正在生成中）
+              autoCollapseAssistantAgent(blockId, 3000); // 3秒后自动折叠
+            }
+          }
+          
           // 任务完成时自动折叠计划
           if (block.type === 'final_result') {
             // 查找对应的计划步骤消息并折叠
@@ -880,12 +1055,12 @@ const cachedContentBlocks = computed(() => {
 function getBlocksForMessage(message: Message): MessageContentBlock[] {
   const map = cachedContentBlocks.value;
   if (map && map.has(message.id)) {
-    return map.get(message.id)!;
+    return deduplicateTextBlocks(map.get(message.id)!);
   }
   try {
     const data = JSON.parse(message.content);
     if (Array.isArray(data)) {
-      return data as MessageContentBlock[];
+      return deduplicateTextBlocks(data as MessageContentBlock[]);
     }
     // 处理单个工具消息或其他类型的消息
     if (data && typeof data === 'object' && data.type) {
@@ -899,6 +1074,85 @@ function getBlocksForMessage(message: Message): MessageContentBlock[] {
     content: message.content,
     timestamp: message.timestamp
   }];
+}
+
+// 新增：专门的文本块去重函数
+function deduplicateTextBlocks(blocks: MessageContentBlock[]): MessageContentBlock[] {
+  const textBlocks: MessageContentBlock[] = [];
+  const nonTextBlocks: MessageContentBlock[] = [];
+  
+  // 分离文本块和非文本块
+  blocks.forEach(block => {
+    if (block.type === 'text') {
+      textBlocks.push(block);
+    } else {
+      nonTextBlocks.push(block);
+    }
+  });
+  
+  // 对文本块进行智能去重
+  const deduplicatedTextBlocks: MessageContentBlock[] = [];
+  
+  for (const currentBlock of textBlocks) {
+    const currentContent = String(currentBlock.content || '').trim();
+    if (!currentContent) continue; // 跳过空内容
+    
+    // 检查是否与已有块重复或包含
+    let shouldAdd = true;
+    let shouldUpdateExisting = false;
+    let targetIndex = -1;
+    
+    for (let i = 0; i < deduplicatedTextBlocks.length; i++) {
+      const existingBlock = deduplicatedTextBlocks[i];
+      const existingContent = String(existingBlock.content || '').trim();
+      
+      // 完全相同，跳过
+      if (existingContent === currentContent) {
+        shouldAdd = false;
+        break;
+      }
+      
+      // 当前内容是已有内容的子串（已有内容更完整），跳过当前块
+      if (existingContent.includes(currentContent)) {
+        shouldAdd = false;
+        break;
+      }
+      
+      // 已有内容是当前内容的子串（当前内容更完整），更新已有块
+      if (currentContent.includes(existingContent)) {
+        shouldUpdateExisting = true;
+        targetIndex = i;
+        shouldAdd = false;
+        break;
+      }
+    }
+    
+    if (shouldAdd) {
+      deduplicatedTextBlocks.push(currentBlock);
+    } else if (shouldUpdateExisting && targetIndex >= 0) {
+      // 用更完整的内容替换已有块，保持较新的时间戳
+      deduplicatedTextBlocks[targetIndex] = {
+        ...deduplicatedTextBlocks[targetIndex],
+        content: currentContent,
+        timestamp: Math.max(deduplicatedTextBlocks[targetIndex].timestamp || 0, currentBlock.timestamp || 0)
+      };
+    }
+  }
+  
+  // 如果没有有效的文本块，但有非文本块，则返回非文本块
+  if (deduplicatedTextBlocks.length === 0 && textBlocks.length > 0) {
+    // 选择最完整的文本块（内容最长的）
+    const longestTextBlock = textBlocks.reduce((prev, current) => {
+      const prevLength = String(prev.content || '').trim().length;
+      const currentLength = String(current.content || '').trim().length;
+      return currentLength > prevLength ? current : prev;
+    });
+    deduplicatedTextBlocks.push(longestTextBlock);
+  }
+  
+  // 合并非文本块和去重后的文本块，按时间戳排序
+  const allBlocks = [...deduplicatedTextBlocks, ...nonTextBlocks];
+  return allBlocks.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
 }
 
 
@@ -953,6 +1207,114 @@ function previewTask(_msg: Message, cblock: MessageContentBlock) {
   }
 }
 
+function viewHtmlReport(cblock: MessageContentBlock) {
+  try {
+    console.log('=== viewHtmlReport 开始 ===');
+    console.log('点击的块:', cblock);
+    
+    const content: any = (cblock as any)?.content ?? {};
+    const payload: any = (cblock as any)?.payload ?? {};
+    
+    console.log('当前块 content:', content);
+    console.log('当前块 payload:', payload);
+    
+    // 尝试多种可能的数据路径
+    let htmlContent = payload.htmlContent || content.htmlContent;
+    let title = payload.title || content.title || 'HTML报告';
+    let fileName = payload.fileName || content.fileName || `${title}.html`;
+    
+    console.log('第一次尝试获取的数据:');
+    console.log('- htmlContent 长度:', htmlContent?.length);
+    console.log('- title:', title);
+    console.log('- fileName:', fileName);
+    
+    // 如果当前块没有HTML内容，尝试从同一条消息的其他块中查找
+    if (!htmlContent) {
+      console.log('当前块没有HTML内容，开始查找同消息的其他块...');
+      
+      // 查找当前消息中包含HTML内容的块
+      const currentMessage = currentMessages.value.find(msg => {
+        const blocks = getBlocksForMessage(msg);
+        return blocks.some(block => block === cblock);
+      });
+      
+      console.log('找到当前消息:', currentMessage?.id);
+      
+      if (currentMessage) {
+        const allBlocks = getBlocksForMessage(currentMessage);
+        console.log('消息的所有块数量:', allBlocks.length);
+        console.log('所有块的类型:', allBlocks.map(b => b.type));
+        
+        // 查找包含HTML内容的块 - 可能是htmlReport或html_report类型
+        const htmlBlock = allBlocks.find(block => {
+          console.log(`检查块类型: ${block.type}`);
+          if (block.type === 'htmlReport') {
+            const hasContent = !!(block as any).payload?.htmlContent;
+            console.log(`- htmlReport 块有HTML内容: ${hasContent}`);
+            return hasContent;
+          }
+          if (block.type === 'html_report') {
+            const hasContent = !!(block as any).content?.htmlContent;
+            console.log(`- html_report 块有HTML内容: ${hasContent}`);
+            return hasContent;
+          }
+          return false;
+        });
+        
+        if (htmlBlock) {
+          console.log('找到HTML块:', htmlBlock.type);
+          
+          // 根据块类型从不同位置提取数据
+          if (htmlBlock.type === 'htmlReport') {
+            htmlContent = (htmlBlock as any).payload.htmlContent;
+            title = (htmlBlock as any).payload.title || title;
+            fileName = (htmlBlock as any).payload.fileName || fileName;
+            console.log('从 htmlReport 块提取数据');
+          } else if (htmlBlock.type === 'html_report') {
+            htmlContent = (htmlBlock as any).content.htmlContent;
+            title = (htmlBlock as any).content.title || title;
+            fileName = (htmlBlock as any).content.fileName || fileName;
+            console.log('从 html_report 块提取数据');
+          }
+        } else {
+          console.log('没有找到包含HTML内容的块');
+        }
+      } else {
+        console.log('没有找到当前消息');
+      }
+    }
+    
+    console.log('最终获取的数据:');
+    console.log('- htmlContent 长度:', htmlContent?.length);
+    console.log('- title:', title);
+    console.log('- fileName:', fileName);
+    
+    if (!htmlContent) {
+      console.error('HTML内容为空，无法显示报告');
+      console.log('=== viewHtmlReport 结束（失败）===');
+      return;
+    }
+    
+    const action = {
+      type: 'htmlReport',
+      description: title,
+      payload: {
+        htmlContent: htmlContent,
+        title: title,
+        fileName: fileName
+      }
+    };
+    
+    console.log('发送到Studio:', action);
+    studioBus.preview(action);
+    isStudioCollapsed.value = false;
+    console.log('=== viewHtmlReport 结束（成功）===');
+  } catch (e) {
+    console.error('查看HTML报告失败:', e);
+    console.log('=== viewHtmlReport 结束（异常）===');
+  }
+}
+
 // 计划步骤管理函数
 function togglePlanStepsCollapse(messageId: string) {
   const currentState = collapsedPlanSteps.value.get(messageId) || false;
@@ -961,6 +1323,112 @@ function togglePlanStepsCollapse(messageId: string) {
 
 function isPlanStepsCollapsed(messageId: string): boolean {
   return collapsedPlanSteps.value.get(messageId) || false;
+}
+
+
+// User Agent消息折叠管理函数
+function toggleUserAgentCollapse(blockId: string) {
+  const currentState = collapsedUserAgents.value.get(blockId) || false;
+  collapsedUserAgents.value.set(blockId, !currentState);
+}
+
+function isUserAgentCollapsed(blockId: string): boolean {
+  return collapsedUserAgents.value.get(blockId) || false;
+}
+
+function autoCollapseUserAgent(blockId: string, delay: number = 3000) {
+  setTimeout(() => {
+    collapsedUserAgents.value.set(blockId, true);
+  }, delay);
+}
+
+// Assistant Agent消息折叠管理函数
+function toggleAssistantAgentCollapse(blockId: string) {
+  const currentState = collapsedAssistantAgents.value.get(blockId) || false;
+  collapsedAssistantAgents.value.set(blockId, !currentState);
+}
+
+function isAssistantAgentCollapsed(blockId: string): boolean {
+  return collapsedAssistantAgents.value.get(blockId) || false;
+}
+
+function autoCollapseAssistantAgent(blockId: string, delay: number = 3000) {
+  setTimeout(() => {
+    collapsedAssistantAgents.value.set(blockId, true);
+  }, delay);
+}
+
+
+// 在studio中打开URL
+function openUrlInStudio(url: string) {
+  try {
+    studioBus.preview({
+      type: 'openUrl',
+      description: `浏览器 - ${url}`,
+      payload: { url: url },
+    });
+    isStudioCollapsed.value = false; // 展开studio面板
+  } catch (error) {
+    console.error('无法在studio中打开URL:', error);
+    // 兜底：在新标签页打开
+    window.open(url, '_blank');
+  }
+}
+
+// 将函数暴露到全局，供HTML onclick使用
+if (typeof window !== 'undefined') {
+  (window as any).openUrlInStudio = openUrlInStudio;
+}
+
+// 格式化工具参数，提取主要内容
+function formatToolParameters(parameters: any): string {
+  if (!parameters || typeof parameters !== 'object') {
+    return String(parameters || '');
+  }
+  
+  // 常见的参数键名，优先显示这些
+  const importantKeys = ['query', 'q', 'search', 'keyword', 'text', 'content', 'prompt', 'message', 'url', 'path', 'file', 'name'];
+  
+  // 查找重要的参数值
+  for (const key of importantKeys) {
+    if (parameters[key]) {
+      return String(parameters[key]);
+    }
+  }
+  
+  // 如果没有找到重要参数，取第一个字符串值
+  const values = Object.values(parameters);
+  const firstStringValue = values.find(v => typeof v === 'string' && v.length > 0);
+  if (firstStringValue) {
+    return String(firstStringValue);
+  }
+  
+  // 兜底：返回参数的简化JSON
+  const keys = Object.keys(parameters);
+  if (keys.length === 1) {
+    return String(parameters[keys[0]]);
+  }
+  
+  return JSON.stringify(parameters);
+}
+
+// 格式化工具参数，支持URL链接
+function formatToolParametersWithUrls(parameters: any): string {
+  const text = formatToolParameters(parameters);
+  return formatTextWithUrls(text);
+}
+
+// 格式化文本，将URL转换为可点击的链接
+function formatTextWithUrls(text: string): string {
+  if (!text) return '';
+  
+  // URL正则表达式，匹配http和https链接
+  const urlRegex = /(https?:\/\/[^\s\n]+)/g;
+  
+  // 将URL替换为可点击的链接
+  return text.replace(urlRegex, (url) => {
+    return `<a href="#" onclick="openUrlInStudio('${url}'); return false;" class="studio-url-link">${url}</a>`;
+  });
 }
 
 function initializePlanStepStatuses(messageId: string, planData: any[]) {
@@ -993,6 +1461,25 @@ function getStatusIcon(status: 'pending' | 'running' | 'completed' | 'failed'): 
     case 'failed': return '❌';
     default: return '⏳';
   }
+}
+
+// 获取tool_call的最新状态
+function getToolCallStatus(message: Message, toolCallBlock: MessageContentBlock): string {
+  const blocks = getBlocksForMessage(message);
+  
+  // 查找对应的tool_message
+  const toolMessage = blocks.find(block => 
+    block.type === 'tool_message' && 
+    (block as any).toolName === ((toolCallBlock as any)?.toolName || (toolCallBlock.content as any)?.toolName) &&
+    (block as any).agentId === ((toolCallBlock as any)?.agentId || (toolCallBlock.content as any)?.agentId)
+  );
+  
+  if (toolMessage) {
+    return (toolMessage as any)?.status || (toolMessage.content as any)?.status || 'completed';
+  }
+  
+  // 如果没有找到对应的tool_message，返回原始状态
+  return (toolCallBlock as any)?.status || (toolCallBlock.content as any)?.status || 'started';
 }
 
 function previewPlanSteps(_msg: Message, cblock: MessageContentBlock) {
@@ -1318,18 +1805,15 @@ async function saveAndResendMessage() {
           <template v-else-if="cblock.type === 'tool_call'">
             <div class="tool-call-block">
               <div class="tool-call-hint">
-                <span class="hint-icon">💡</span>
-                <span class="hint-text">正在调用工具：{{ cblock.content }}</span>
+                <span class="hint-icon">🔧</span>
+                <div class="tool-call-inline">
+                  工具：{{ (cblock as any)?.toolName || (cblock.content as any)?.toolName || cblock.content }}
+                  <span v-if="(cblock as any)?.parameters || (cblock.content as any)?.parameters" class="tool-parameters-simple">
+                    <span v-html="formatToolParametersWithUrls((cblock as any)?.parameters || (cblock.content as any)?.parameters)"></span>
+                  </span>
+                  <span class="tool-status-inline">{{ getToolCallStatus(message, cblock) }}</span>
+                </div>
               </div>
-            </div>
-          </template>
-          <template v-else-if="cblock.type === 'tool_message'">
-            <ToolCallDisplay 
-              v-if="typeof cblock.content === 'object' && cblock.content.toolName"
-              :tool-message="cblock.content"
-            />
-            <div v-else class="tool-message-block">
-              <pre>{{ typeof cblock.content === 'string' ? cblock.content : JSON.stringify(cblock.content, null, 2) }}</pre>
             </div>
           </template>
           <template v-else-if="cblock.type === 'url_links'">
@@ -1410,6 +1894,51 @@ async function saveAndResendMessage() {
                   {{ typeof cblock.content === 'object' ? (cblock.content.description || '[无描述]') : String(cblock.content) }}
                 </div>
                 <button class="task-preview-btn" @click="previewTask(message, cblock)">预览</button>
+              </div>
+            </div>
+          </template>
+          <template v-else-if="cblock.type === 'html_report'">
+            <div class="html-report-link">
+              <a href="#" @click.prevent="viewHtmlReport(cblock)">
+                {{ ((cblock.content as any)?.title || '报告') + '.html' }}
+              </a>
+            </div>
+          </template>
+          <template v-else-if="cblock.type === 'user_agent'">
+            <div class="user-agent-block" :class="{ collapsed: isUserAgentCollapsed(cblock.id || `user_agent_${index}`) }">
+              <div 
+                class="user-agent-header" 
+                @click="toggleUserAgentCollapse(cblock.id || `user_agent_${index}`)"
+              >
+                <span class="user-agent-collapse-icon">
+                  {{ isUserAgentCollapsed(cblock.id || `user_agent_${index}`) ? '▶' : '▼' }}
+                </span>
+                <span v-if="isUserAgentCollapsed(cblock.id || `user_agent_${index}`)" class="user-agent-preview">
+                  {{ String(cblock.content || '').substring(0, 50) }}{{ String(cblock.content || '').length > 50 ? '...' : '' }}
+                </span>
+              </div>
+              <div class="user-agent-content" v-show="!isUserAgentCollapsed(cblock.id || `user_agent_${index}`)">
+                <div class="user-agent-text" v-html="formatTextWithUrls(String(cblock.content || ''))">
+                </div>
+              </div>
+            </div>
+          </template>
+          <template v-else-if="cblock.type === 'assistant_agent'">
+            <div class="assistant-agent-block" :class="{ collapsed: isAssistantAgentCollapsed(cblock.id || `assistant_agent_${index}`) }">
+              <div 
+                class="assistant-agent-header" 
+                @click="toggleAssistantAgentCollapse(cblock.id || `assistant_agent_${index}`)"
+              >
+                <span class="assistant-agent-collapse-icon">
+                  {{ isAssistantAgentCollapsed(cblock.id || `assistant_agent_${index}`) ? '▶' : '▼' }}
+                </span>
+                <span v-if="isAssistantAgentCollapsed(cblock.id || `assistant_agent_${index}`)" class="assistant-agent-preview">
+                  {{ String(cblock.content || '').substring(0, 50) }}{{ String(cblock.content || '').length > 50 ? '...' : '' }}
+                </span>
+              </div>
+              <div class="assistant-agent-content" v-show="!isAssistantAgentCollapsed(cblock.id || `assistant_agent_${index}`)">
+                <div class="assistant-agent-text" v-html="formatTextWithUrls(String(cblock.content || ''))">
+                </div>
               </div>
             </div>
           </template>
@@ -2664,33 +3193,54 @@ async function saveAndResendMessage() {
   color: var(--text-secondary);
 }
 
-/* 工具调用提示样式 */
+/* 工具调用一行样式 */
 .tool-call-hint {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  background-color: #f0f9ff;
+  gap: 10px;
+  padding: 10px 16px;
+  background-color: #eff6ff;
   border-left: 3px solid #3b82f6;
-  border-radius: 4px;
+  border-radius: 6px;
   margin: 8px 0;
 }
 
 .hint-icon {
-  font-size: 20px;
+  font-size: 16px;
   flex-shrink: 0;
 }
 
-.hint-text {
-  color: #1e40af;
+.tool-call-inline {
+  color: #1d4ed8;
   font-weight: 500;
   font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-parameters-simple {
+  color: #4b5563;
+  font-size: 14px;
+  font-weight: normal;
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-status-inline {
+  color: #059669;
+  font-size: 11px;
+  font-weight: 500;
+  background-color: rgba(5, 150, 105, 0.1);
+  padding: 2px 6px;
+  border-radius: 3px;
 }
 
 /* 消息块样式 */
-.tool-message-block,
 .url-links-block,
-.plan-steps-block,
 .step-result-block {
   background-color: #f9fafb;
   border: 1px solid #e5e7eb;
@@ -2699,6 +3249,31 @@ async function saveAndResendMessage() {
   margin: 8px 0;
   font-size: 14px;
   overflow-x: auto;
+}
+
+
+/* Studio URL链接样式 */
+.studio-url-link {
+  color: #3b82f6 !important;
+  text-decoration: underline;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-weight: 500;
+}
+
+.studio-url-link:hover {
+  color: #1d4ed8 !important;
+  background-color: rgba(59, 130, 246, 0.1);
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.tool-result-text pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: 'Courier New', monospace;
+  color: #374151;
 }
 
 /* 可点击块样式 */
@@ -2997,6 +3572,138 @@ async function saveAndResendMessage() {
 
 .final-result-content li {
   margin-bottom: 6px;
+}
+
+/* HTML报告样式（简化为超链接） */
+.html-report-link a {
+  color: #2563eb;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.html-report-link a:hover {
+  color: #1d4ed8;
+}
+
+/* User Agent消息样式 - 简约设计 */
+.user-agent-block {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 6px 0;
+  transition: all 0.2s ease;
+}
+
+.user-agent-block.collapsed {
+  border-color: #e2e8f0;
+}
+
+.user-agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 4px 8px;
+  background: #f1f5f9;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  min-height: 20px;
+}
+
+.user-agent-header:hover {
+  background: #e2e8f0;
+}
+
+.user-agent-collapse-icon {
+  font-size: 10px;
+  color: var(--text-secondary);
+  transition: transform 0.2s;
+}
+
+.user-agent-preview {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-left: 8px;
+  opacity: 0.8;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-agent-content {
+  padding: 12px;
+  animation: fadeIn 0.2s ease;
+}
+
+.user-agent-text {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.4;
+  opacity: 0.9;
+}
+
+/* Assistant Agent消息样式 - 简约设计 */
+.assistant-agent-block {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 6px 0;
+  transition: all 0.2s ease;
+}
+
+.assistant-agent-block.collapsed {
+  border-color: #e2e8f0;
+}
+
+.assistant-agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 4px 8px;
+  background: #f1f5f9;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  min-height: 20px;
+}
+
+.assistant-agent-header:hover {
+  background: #e2e8f0;
+}
+
+.assistant-agent-collapse-icon {
+  font-size: 10px;
+  color: var(--text-secondary);
+  transition: transform 0.2s;
+}
+
+.assistant-agent-preview {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-left: 8px;
+  opacity: 0.8;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.assistant-agent-content {
+  padding: 12px;
+  animation: fadeIn 0.2s ease;
+}
+
+.assistant-agent-text {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.4;
+  opacity: 0.9;
 }
 
 .final-result-content code {

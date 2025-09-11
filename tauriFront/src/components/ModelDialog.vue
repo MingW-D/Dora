@@ -15,6 +15,32 @@ watch(() => modelStore.isModelDialogOpen, (isOpen) => {
 // 错误提示
 const errorMessage = ref('');
 
+// 根据provider获取占位符
+function getModelNamePlaceholder() {
+  return modelStore.editingModel.provider === 'ollama' 
+    ? '如：llama2, qwen:7b, codellama' 
+    : '如：gpt-4, gpt-3.5-turbo';
+}
+
+function getApiUrlPlaceholder() {
+  return modelStore.editingModel.provider === 'ollama' 
+    ? '如：http://localhost:11434/v1' 
+    : '如：https://api.openai.com/v1/chat/completions';
+}
+
+// Provider变化时更新默认值
+function onProviderChange() {
+  if (modelStore.editingModel.provider === 'ollama') {
+    if (!modelStore.editingModel.api_url || modelStore.editingModel.api_url.includes('openai.com')) {
+      modelStore.editingModel.api_url = 'http://localhost:11434/v1';
+    }
+  } else if (modelStore.editingModel.provider === 'openai') {
+    if (!modelStore.editingModel.api_url || modelStore.editingModel.api_url.includes('localhost:11434')) {
+      modelStore.editingModel.api_url = 'https://api.openai.com/v1/chat/completions';
+    }
+  }
+}
+
 // 保存模型配置
 async function saveModel() {
   // 基本验证
@@ -71,6 +97,18 @@ function cancelEdit() {
         </div>
         
         <div class="form-group">
+          <label for="provider">模型提供商</label>
+          <select 
+            id="provider" 
+            v-model="modelStore.editingModel.provider"
+            @change="onProviderChange"
+          >
+            <option value="openai">OpenAI</option>
+            <option value="ollama">Ollama</option>
+          </select>
+        </div>
+        
+        <div class="form-group">
           <label for="name">模型显示名称</label>
           <input 
             id="name" 
@@ -86,7 +124,7 @@ function cancelEdit() {
             id="model_name" 
             v-model="modelStore.editingModel.model_name" 
             type="text" 
-            placeholder="如：gpt-4, gpt-3.5-turbo"
+            :placeholder="getModelNamePlaceholder()"
           />
         </div>
         
@@ -96,7 +134,7 @@ function cancelEdit() {
             id="api_url" 
             v-model="modelStore.editingModel.api_url" 
             type="text" 
-            placeholder="如：https://api.openai.com/v1/chat/completions"
+            :placeholder="getApiUrlPlaceholder()"
           />
         </div>
         
@@ -158,6 +196,18 @@ function cancelEdit() {
             min="100" 
             max="8000" 
           />
+        </div>
+        
+        <div class="form-group checkbox-group">
+          <input 
+            id="supports_tools" 
+            v-model="modelStore.editingModel.supports_tools"
+            type="checkbox"
+          />
+          <label for="supports_tools">支持工具调用 (Functions)</label>
+          <div class="help-text">
+            如果不确定，保持未勾选。OpenAI模型通常支持，部分Ollama模型不支持。
+          </div>
         </div>
         
         <div class="form-group checkbox-group">
@@ -263,7 +313,8 @@ function cancelEdit() {
 
 .form-group input[type="text"],
 .form-group input[type="password"],
-.form-group input[type="number"] {
+.form-group input[type="number"],
+.form-group select {
   width: 100%;
   padding: 10px 12px;
   border: 1px solid var(--border-color);

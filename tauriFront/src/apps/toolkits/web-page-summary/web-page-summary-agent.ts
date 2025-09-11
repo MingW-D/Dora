@@ -1,4 +1,4 @@
-import { lastValueFrom } from 'rxjs';
+import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import { BaseAgent } from '../../agent/base-agent.js';
 import type { AgentTaskRef } from '../../agent/type.js';
 import type { SpecializedToolAgent } from '../types.js';
@@ -84,7 +84,9 @@ ${summary}`,
         taskRef.observer,
       );
 
-      return await lastValueFrom(summaryCompletion.contentStream);
+      return await lastValueFrom(
+        summaryCompletion.contentStream.pipe(defaultIfEmpty(''))
+      );
     } catch (error) {
       throw new Error('Failed to extract html content');
     }

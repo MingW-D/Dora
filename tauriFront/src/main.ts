@@ -31,6 +31,9 @@ getCurrentWindow().listen('studio', (event) => {
       case 'openUrl':
         // 仅 openUrl 承载 URL，交由 StudioPane 赋值 iframe.src
         return { type: 'openUrl', description: action.description, payload: action.payload };
+      case 'htmlReport':
+        // HTML报告类型，直接传递给StudioPane处理
+        return { type: 'htmlReport', description: action.description, payload: action.payload };
       case 'browserVisible':
         // 独立的可见性事件，不再映射为 html
         return { type: 'visibility', description: action.description, payload: action.payload };

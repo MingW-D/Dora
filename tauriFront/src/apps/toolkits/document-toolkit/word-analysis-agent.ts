@@ -5,7 +5,7 @@ import yaml from 'js-yaml';
 // 使用浏览器内置 DOMParser 解析 HTML，避免引入 jsdom
 // 可以使用mammoth等库来处理Word文档
 import mammoth from 'mammoth';
-import { lastValueFrom } from 'rxjs';
+import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import { BaseAgent } from '../../agent/base-agent.js';
 import type { AgentTaskRef } from '../../agent/type.js';
 import type { SpecializedToolAgent } from '../types.js';
@@ -237,6 +237,8 @@ export class WordAnalysisAgent extends BaseAgent implements SpecializedToolAgent
       throw new Error('Unable to analyze Word document content');
     }
 
-    return await lastValueFrom(result?.contentStream);
+    return await lastValueFrom(
+      result?.contentStream?.pipe(defaultIfEmpty('')) || Promise.resolve('')
+    );
   }
 }

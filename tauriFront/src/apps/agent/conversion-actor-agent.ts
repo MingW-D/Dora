@@ -8,6 +8,7 @@ import { TauriWindowManager } from '../tauri-adapters/window-manager';
 import { CoordinateRolePlayAgent } from './coordinate-role-play.js';
 import { Studio } from './studio/index.js';
 import type { AgentTaskRef, MessageStream } from './type.js';
+import { useModelStore } from '../../stores/modelStore';
 
 export class ConversionActorAgent {
   private readonly abortSignal: AbortSignal;
@@ -38,7 +39,10 @@ export class ConversionActorAgent {
     if (this.browserUse) return;
 
     try {
-      await loadSdkAndModel();
+      const modelStore = useModelStore();
+      const currentModelId = modelStore.currentModelId;
+      
+      await loadSdkAndModel(currentModelId);
 
       // Tauri 适配的 BrowserUse（简化占位实现，负责协议对齐与事件桥接）
       this.browserUse = new TauriBrowserUse();
@@ -82,6 +86,7 @@ export class ConversionActorAgent {
     const uiMessageId =
       typeof taskOrOptions === 'object' ? taskOrOptions?.uiMessageId : undefined;
 
+      console.log('taskOverride', taskOverride);
     // 优先使用显式传入的任务（来自前端用户输入）
     if (taskOverride && taskOverride.trim()) {
       this.resetObserver();

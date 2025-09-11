@@ -1,6 +1,6 @@
 import { TauriWindowManager } from '../apps/tauri-adapters/window-manager';
 
-export type StudioActionType = string;
+export type StudioActionType = 'openUrl' | 'searchResults' | 'editor' | 'openFolder' | 'openFile' | 'htmlReport' | 'visibility' | string;
 export type StudioAction = {
   type: StudioActionType;
   description: string;

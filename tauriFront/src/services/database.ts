@@ -162,13 +162,14 @@ class DatabaseService {
       'SELECT * FROM model_configs ORDER BY is_default DESC, name ASC'
     );
 
-    // 处理API密钥
+    // 处理API密钥和布尔值转换
     const result: ModelConfig[] = [];
     for (const config of configs) {
       const apiKey = await this.getSetting(`api_key_${config.id}`);
       result.push({
         ...config,
-        api_key: apiKey || undefined
+        api_key: apiKey || undefined,
+        supports_tools: config.supports_tools === 1
       });
     }
 
@@ -189,7 +190,8 @@ class DatabaseService {
     
     return {
       ...result[0],
-      api_key: apiKey || undefined
+      api_key: apiKey || undefined,
+      supports_tools: result[0].supports_tools === 1
     };
   }
 
@@ -206,12 +208,12 @@ class DatabaseService {
     // 插入新配置，但不包括API密钥
     await db.execute(
       `INSERT INTO model_configs (
-        id, name, model_name, api_url, description, prompt_template, 
+        id, name, model_name, api_url, provider, supports_tools, description, prompt_template, 
         temperature, max_tokens, is_default, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
-        config.id, config.name, config.model_name, config.api_url,
-        config.description, config.prompt_template,
+        config.id, config.name, config.model_name, config.api_url, config.provider || 'openai',
+        config.supports_tools ? 1 : 0, config.description, config.prompt_template,
         config.temperature, config.max_tokens, config.is_default ? 1 : 0,
         config.created_at, config.updated_at
       ]
@@ -238,12 +240,13 @@ class DatabaseService {
     // 更新配置，但不包括API密钥
     await db.execute(
       `UPDATE model_configs SET 
-        name = $1, model_name = $2, api_url = $3, description = $4,
-        prompt_template = $5, temperature = $6, max_tokens = $7,
-        is_default = $8, updated_at = $9
-      WHERE id = $10`,
+        name = $1, model_name = $2, api_url = $3, provider = $4, supports_tools = $5, description = $6,
+        prompt_template = $7, temperature = $8, max_tokens = $9,
+        is_default = $10, updated_at = $11
+      WHERE id = $12`,
       [
-        config.name, config.model_name, config.api_url, config.description,
+        config.name, config.model_name, config.api_url, config.provider || 'openai', 
+        config.supports_tools ? 1 : 0, config.description,
         config.prompt_template, config.temperature, config.max_tokens,
         config.is_default ? 1 : 0, config.updated_at, config.id
       ]

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fetch } from '@tauri-apps/plugin-http';
 import yaml from 'js-yaml';
-import { lastValueFrom } from 'rxjs';
+import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import { BaseAgent } from '../../agent/base-agent.js';
 import type { AgentTaskRef } from '../../agent/type.js';
 import type { SpecializedToolAgent } from '../types.js';
@@ -75,7 +75,9 @@ export class PowerPointAnalysisAgent extends BaseAgent implements SpecializedToo
       'IMAGE_TO_TEXT',
     );
 
-    return await lastValueFrom(chatCompletion.contentStream);
+    return await lastValueFrom(
+      chatCompletion.contentStream.pipe(defaultIfEmpty(''))
+    );
   }
 
   async execute(query: Record<string, string>, taskRef: AgentTaskRef): Promise<string> {
@@ -218,6 +220,8 @@ export class PowerPointAnalysisAgent extends BaseAgent implements SpecializedToo
       throw new Error('Failed to analyze PowerPoint content');
     }
 
-    return await lastValueFrom(result?.contentStream);
+    return await lastValueFrom(
+      result?.contentStream?.pipe(defaultIfEmpty('')) || Promise.resolve('')
+    );
   }
 }

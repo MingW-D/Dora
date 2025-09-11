@@ -168,6 +168,9 @@ async function saveApiKey() {
                   <div class="model-name">
                     {{ model.name }}
                     <span v-if="model.is_default" class="default-badge">默认</span>
+                    <span class="provider-badge" :class="model.provider || 'openai'">
+                      {{ (model.provider || 'openai') === 'ollama' ? 'Ollama' : 'OpenAI' }}
+                    </span>
                   </div>
                   <div class="model-id">{{ model.model_name }}</div>
                   <div class="model-desc">{{ model.description }}</div>
@@ -411,6 +414,24 @@ async function saveApiKey() {
   font-size: 11px;
   border-radius: 4px;
   font-weight: normal;
+}
+
+.provider-badge {
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  font-weight: normal;
+  margin-left: 4px;
+}
+
+.provider-badge.openai {
+  background-color: rgba(16, 163, 127, 0.1);
+  color: #10a37f;
+}
+
+.provider-badge.ollama {
+  background-color: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
 }
 
 .model-id {

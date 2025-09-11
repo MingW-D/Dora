@@ -14,7 +14,7 @@ export interface SearchProgress {
 
 // 消息内容块类型
 export interface MessageContentBlock {
-  type: 'text' | 'tool_call' | 'url_links' | 'plan_steps' | 'step_result' | 'tool_message' | 'task' | 'subtask_status' | 'final_result';
+  type: 'text' | 'tool_call' | 'url_links' | 'plan_steps' | 'step_result' | 'tool_message' | 'task' | 'subtask_status' | 'final_result' | 'html_report' | 'htmlReport' | 'user_agent' | 'assistant_agent';
   content: string | string[] | StepResult | ToolMessage | TaskBlockContent | SubtaskStatus | FinalResult;
   timestamp?: number;
   id?: string;

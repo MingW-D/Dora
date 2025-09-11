@@ -5,18 +5,54 @@ import type {
   ChatCompletionMessageToolCall,
 } from 'openai/resources/index.mjs';
 import type { FunctionDefinition } from 'openai/resources/shared.mjs';
-import { lastValueFrom } from 'rxjs';
+import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 import { loadSdkAndModel } from '../ai-sdk/index.js';
 import { ChatCompletion } from '../model/chat-completion.js';
 import type { SpecializedToolAgent } from '../toolkits/types.js';
 import type { AgentTaskRef } from './type.js';
 import { tokenCounter } from '../utils/token-counter.js';
+import { useModelStore } from '../../stores/modelStore';
 
 type Message = ChatCompletionMessageParam & {
   tool_calls?: ChatCompletionMessageToolCall[];
   tool_call_id?: string;
 };
+
+// 判断 Ollama 模型是否支持工具调用
+function shouldSupportTools(modelName: string): boolean {
+  const model = modelName.toLowerCase();
+  
+  // 已知不支持工具的模型列表
+  const unsupportedModels = [
+    'deepseek-r1',
+    'llama2',
+    'codellama',
+    'vicuna',
+    'alpaca'
+  ];
+  
+  // 已知支持工具的模型列表（部分较新的模型）
+  const supportedModels = [
+    'llama3',
+    'qwen',
+    'mistral',
+    'mixtral'
+  ];
+  
+  // 检查是否在不支持列表中
+  if (unsupportedModels.some(unsupported => model.includes(unsupported))) {
+    return false;
+  }
+  
+  // 检查是否在支持列表中
+  if (supportedModels.some(supported => model.includes(supported))) {
+    return true;
+  }
+  
+  // 默认情况下，假设不支持工具（保守策略）
+  return false;
+}
 
 export class BaseAgent {
   protected messageHistory: Array<Message> = [];
@@ -116,12 +152,36 @@ export class BaseAgent {
         throw new Error('Operation cancelled by user');
       }
 
+      const modelStore = useModelStore();
+      const currentModelId = modelStore.currentModelId;
+      
+      const modelProvider = await loadSdkAndModel(currentModelId);
+      const currentModel = modelStore.currentModel;
+      
+      // 检查是否支持工具调用
+      let supportsTools = false;
+      if (currentModel?.supports_tools !== undefined) {
+        // 如果手动指定了支持状态，使用用户设置
+        supportsTools = currentModel.supports_tools;
+      } else {
+        // 否则使用自动检测
+        supportsTools = modelProvider[model].provider === 'openai' || 
+          (modelProvider[model].provider === 'ollama' && shouldSupportTools(modelProvider[model].model));
+      }
+      
+      // 如果模型不支持工具，则禁用工具调用并警告用户
+      let effectiveTools = tools;
+      if (!supportsTools && tools?.length) {
+        console.warn(`Model ${modelProvider[model].model} (${modelProvider[model].provider}) does not support tools. Tools will be ignored.`);
+        effectiveTools = []; // 使用空的工具列表
+      }
+      
       let generateParams = {} as Omit<ChatCompletionCreateParamsStreaming, 'messages' | 'model'>;
-      if (tools?.length) {
+      if (effectiveTools?.length) {
         // 打印所有工具名称，用于检查格式
-        console.log('Tools being sent to API:', tools.map((tool) => `"${tool.name}"`).join(', '));
+        console.log('Tools being sent to API:', effectiveTools.map((tool) => `"${tool.name}"`).join(', '));
 
-        generateParams.tools = tools.map((tool) => ({
+        generateParams.tools = effectiveTools.map((tool) => ({
           type: 'function',
           function: {
             name: tool.name,
@@ -137,8 +197,7 @@ export class BaseAgent {
           ...params,
         };
       }
-
-      const modelProvider = await loadSdkAndModel();
+      
       const chatCompletion = await modelProvider[model].sdk.chat.completions.create(
         {
           model: modelProvider[model].model,
@@ -259,7 +318,7 @@ export class BaseAgent {
         const toolMessage = await taskRef.createMessage('Tool Agent');
         toolMessage.content = JSON.stringify({
           type: 'tool_call',
-          toolName: tool.description || toolName,
+          toolName: toolName,
           agentId: this.uuid,
           status: 'started',
           parameters: parsedArgs,
@@ -365,7 +424,7 @@ export class BaseAgent {
       let chatCompletion: ChatCompletion | null = null;
       let toolExecutionCount = 0;
       const MAX_TOOL_EXECUTIONS = 20;
-
+      console.log('messageHistory', this.messageHistory);
       while (!taskRef.abortSignal.aborted && toolExecutionCount < MAX_TOOL_EXECUTIONS) {
         chatCompletion = await this.generateResponse(
           taskRef.abortSignal,
@@ -375,7 +434,9 @@ export class BaseAgent {
           model,
         );
 
-        const toolCalls = await lastValueFrom(chatCompletion.toolCallsStream);
+        const toolCalls = await lastValueFrom(
+          chatCompletion.toolCallsStream.pipe(defaultIfEmpty([]))
+        );
         if (!toolCalls.length) {
           break;
         }

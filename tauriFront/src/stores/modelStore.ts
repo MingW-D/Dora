@@ -9,6 +9,8 @@ export interface ModelConfig {
   model_name: string;
   api_url: string;
   api_key?: string;
+  provider: 'openai' | 'ollama';
+  supports_tools?: boolean; // 可选字段，用于手动指定是否支持工具
   description: string;
   prompt_template: string;
   temperature: number;
@@ -37,6 +39,7 @@ export const useModelStore = defineStore('models', () => {
     model_name: '',
     api_url: '',
     api_key: '',
+    provider: 'openai',
     description: '',
     prompt_template: DEFAULT_PROMPT_TEMPLATE,
     temperature: 0.7,
@@ -104,6 +107,7 @@ export const useModelStore = defineStore('models', () => {
       name: 'OpenAI GPT-3.5',
       model_name: 'gpt-3.5-turbo',
       api_url: 'https://api.openai.com/v1/completions',
+      provider: 'openai',
       description: 'OpenAI的GPT-3.5模型',
       prompt_template: DEFAULT_PROMPT_TEMPLATE,
       temperature: 0.7,
@@ -237,6 +241,7 @@ export const useModelStore = defineStore('models', () => {
       model_name: '',
       api_url: '',
       api_key: '',
+      provider: 'openai',
       description: '',
       prompt_template: DEFAULT_PROMPT_TEMPLATE,
       temperature: 0.7,
@@ -259,6 +264,8 @@ export const useModelStore = defineStore('models', () => {
         model_name: modelToEdit.model_name,
         api_url: modelToEdit.api_url,
         api_key: modelToEdit.api_key || '',
+        provider: modelToEdit.provider || 'openai',
+        supports_tools: modelToEdit.supports_tools || false,
         description: modelToEdit.description,
         prompt_template: modelToEdit.prompt_template,
         temperature: modelToEdit.temperature,

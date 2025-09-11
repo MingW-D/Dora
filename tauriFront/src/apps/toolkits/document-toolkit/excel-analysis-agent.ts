@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fetch } from '@tauri-apps/plugin-http';
 import ExcelJS from 'exceljs';
-import { lastValueFrom } from 'rxjs';
+import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import { BaseAgent } from '../../agent/base-agent.js';
 import type { AgentTaskRef } from '../../agent/type.js';
 import type { SpecializedToolAgent } from '../types.js';
@@ -213,6 +213,8 @@ export class ExcelAnalysisAgent extends BaseAgent implements SpecializedToolAgen
       throw new Error('Failed to analyze Excel content');
     }
 
-    return await lastValueFrom(result?.contentStream);
+    return await lastValueFrom(
+      result?.contentStream?.pipe(defaultIfEmpty('')) || Promise.resolve('')
+    );
   }
 }

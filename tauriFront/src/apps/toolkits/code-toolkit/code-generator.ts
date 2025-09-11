@@ -1,5 +1,5 @@
 import yaml from 'js-yaml';
-import { lastValueFrom } from 'rxjs';
+import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import { BaseAgent } from '../../agent/base-agent.js';
 import type { AgentTaskRef } from '../../agent/type.js';
 import type { SpecializedToolAgent } from '../types.js';
@@ -57,7 +57,9 @@ export class CodeGeneratorAgent extends BaseAgent implements SpecializedToolAgen
       return yaml.dump({
         success: true,
         language,
-        code: await lastValueFrom(generatedCode.contentStream),
+        code: await lastValueFrom(
+        generatedCode.contentStream.pipe(defaultIfEmpty(''))
+      ),
         message: 'Code generated successfully',
       });
     } catch (error) {

@@ -1,4 +1,4 @@
-import { lastValueFrom } from 'rxjs';
+import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import type { ChatCompletion } from '../model/chat-completion.js';
 import {
   coordinatingUserPrompt,
@@ -57,23 +57,25 @@ export class CoordinateRolePlayAgent {
           },
         });
       }
-      assistantCompletion.contentStream.subscribe({
-        next: (value) => {
-          messageModel.content = value;
-          taskRef.observer.next(messageModel);
-        },
-        async complete() {
-          await taskRef.completeMessage(messageModel);
-          taskRef.observer.next(messageModel);
-        },
-        error: (error) => {
-          taskRef.completeMessage(messageModel, 'FAILED');
-          taskRef.observer.next(messageModel);
-          console.log('error', error);
-        },
-      });
+      // assistantCompletion.contentStream.subscribe({
+      //   next: (value) => {
+      //     messageModel.content = value;
+      //     taskRef.observer.next(messageModel);
+      //   },
+      //   async complete() {
+      //     await taskRef.completeMessage(messageModel);
+      //     taskRef.observer.next(messageModel);
+      //   },
+      //   error: (error) => {
+      //     taskRef.completeMessage(messageModel, 'FAILED');
+      //     taskRef.observer.next(messageModel);
+      //     console.log('error', error);
+      //   },
+      // });
 
-      message = await lastValueFrom(assistantCompletion.contentStream);
+      message = await lastValueFrom(
+        assistantCompletion.contentStream.pipe(defaultIfEmpty(''))
+      );
       if (message.toUpperCase().includes('TASK_DONE')) {
         message += toFinalAnswerPrompt(task);
         assistantCompletion = await this.roleAgent.run(message, taskRef);
@@ -104,22 +106,24 @@ export class CoordinateRolePlayAgent {
           });
         }
         taskRef.observer.next(messageModel);
-        assistantCompletion.contentStream.subscribe({
-          next: (value) => {
-            messageModel.content = value;
-            taskRef.observer.next(messageModel);
-          },
-          async complete() {
-            await taskRef.completeMessage(messageModel);
-            taskRef.observer.next(messageModel);
-          },
-          error: (error) => {
-            taskRef.completeMessage(messageModel, 'FAILED');
-            taskRef.observer.next(messageModel);
-            console.log('error', error);
-          },
-        });
-        await lastValueFrom(assistantCompletion.contentStream);
+        // assistantCompletion.contentStream.subscribe({
+        //   next: (value) => {
+        //     messageModel.content = value;
+        //     taskRef.observer.next(messageModel);
+        //   },
+        //   async complete() {
+        //     await taskRef.completeMessage(messageModel);
+        //     taskRef.observer.next(messageModel);
+        //   },
+        //   error: (error) => {
+        //     taskRef.completeMessage(messageModel, 'FAILED');
+        //     taskRef.observer.next(messageModel);
+        //     console.log('error', error);
+        //   },
+        // });
+        await lastValueFrom(
+          assistantCompletion.contentStream.pipe(defaultIfEmpty(''))
+        );
         break;
       }
 
