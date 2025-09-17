@@ -52,7 +52,7 @@ interface ChartResult {
 export class ChartAgent extends BaseAgent implements SpecializedToolAgent {
   override name = 'ChartAgent';
 
-  description = 'Chart agent';
+  description = 'Professional chart generation tool that creates various types of data visualizations including bar charts, line charts, pie charts, scatter plots, area charts, radar charts, and heatmaps';
 
   parameters = {
     type: 'object',
@@ -60,45 +60,45 @@ export class ChartAgent extends BaseAgent implements SpecializedToolAgent {
       chartType: {
         type: 'string',
         enum: ['bar', 'line', 'pie', 'scatter', 'area', 'radar', 'heatmap'],
-        description: '要生成的图表类型',
+        description: 'Type of chart to generate',
       },
       title: {
         type: 'string',
-        description: '图表的标题',
+        description: 'Title of the chart',
       },
       data: {
         type: 'object',
-        description: '图表数据，可以是数组或对象，取决于图表类型',
+        description: 'Chart data, can be array or object depending on chart type',
       },
       xAxis: {
         type: 'object',
         properties: {
-          name: { type: 'string', description: 'X轴名称' },
-          data: { type: 'array', items: { type: 'string' }, description: 'X轴数据类别' },
+          name: { type: 'string', description: 'X-axis name' },
+          data: { type: 'array', items: { type: 'string' }, description: 'X-axis data categories' },
         },
-        description: 'X轴配置（适用于柱状图、折线图等）',
+        description: 'X-axis configuration (for bar charts, line charts, etc.)',
       },
       yAxis: {
         type: 'object',
         properties: {
-          name: { type: 'string', description: 'Y轴名称' },
-          min: { type: 'number', description: 'Y轴最小值' },
-          max: { type: 'number', description: 'Y轴最大值' },
+          name: { type: 'string', description: 'Y-axis name' },
+          min: { type: 'number', description: 'Y-axis minimum value' },
+          max: { type: 'number', description: 'Y-axis maximum value' },
         },
-        description: 'Y轴配置（适用于柱状图、折线图等）',
+        description: 'Y-axis configuration (for bar charts, line charts, etc.)',
       },
       width: {
         type: 'number',
-        description: '图表宽度（像素）',
+        description: 'Chart width in pixels',
       },
       height: {
         type: 'number',
-        description: '图表高度（像素）',
+        description: 'Chart height in pixels',
       },
       theme: {
         type: 'string',
         enum: ['light', 'dark', 'default'],
-        description: '图表主题',
+        description: 'Chart theme',
       },
     },
     required: ['chartType', 'data'],

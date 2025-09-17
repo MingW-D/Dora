@@ -349,7 +349,7 @@ export class BaseAgent {
           const completedMessage = await taskRef.createMessage('Tool Agent');
           completedMessage.content = JSON.stringify({
             type: 'tool_message',
-            toolName: tool.description || toolName,
+            toolName: toolName,
             agentId: this.uuid,
             status: 'completed',
             parameters: parsedArgs,

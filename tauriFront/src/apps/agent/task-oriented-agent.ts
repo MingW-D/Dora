@@ -45,7 +45,6 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
 
   private plannerAgent = new BaseAgent({
     temperature: 0.2,
-    tools
   });
 
   private executorAgent = new DialogueAgent();
@@ -70,7 +69,7 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
   async execute(query: Parameters, taskRef: AgentTaskRef): Promise<string> {
     // 初始化代理系统消息
     this.plannerAgent.initialSystemMessage(
-      plannerAgentSystemPrompt(TaskOrientedAgent.MAX_SUBTASKS),
+      plannerAgentSystemPrompt(TaskOrientedAgent.MAX_SUBTASKS, tools.map((tool) => `${tool.name}: ${tool.description}`)),
     );
 
     this.validatorAgent.initialSystemMessage(validatorAgentSystemPrompt());

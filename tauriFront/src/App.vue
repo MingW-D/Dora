@@ -3085,6 +3085,7 @@ async function saveAndResendMessage() {
 .studio-dock {
   width: 36%;
   min-width: 360px;
+  max-width: 600px; /* 限制最大宽度，防止挤压主内容区 */
   background: transparent; /* 避免圆角处露出深色背景 */
   display: flex;
 }
@@ -3093,6 +3094,7 @@ async function saveAndResendMessage() {
   .studio-dock {
     width: 32%;
     min-width: 300px;
+    max-width: 500px; /* 小屏幕下进一步限制最大宽度 */
   }
 }
 
@@ -3115,6 +3117,8 @@ async function saveAndResendMessage() {
 .studio-dock__panel {
   flex: 1;
   display: flex;
+  min-width: 0; /* 防止内容溢出 */
+  overflow: hidden; /* 隐藏溢出内容 */
 }
 .studio-dock.collapsed {
   width: 20px !important;

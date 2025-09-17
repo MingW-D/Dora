@@ -7,6 +7,7 @@ import { htmlReportToolkits } from '../toolkits/html-report-toolkit';
 import { searchToolkits } from '../toolkits/search-toolkit';
 import { webPageSummaryToolkits } from '../toolkits/web-page-summary';
 import { xiaohongshuToolkits } from '../toolkits/XHS-toolkit';
+import { videoSearchToolkits } from '../toolkits/video-toolkit';
 
 export const tools = [
   ...searchToolkits,
@@ -17,4 +18,5 @@ export const tools = [
   ...htmlReportToolkits,
   // ...codeToolkit, 
   ...xiaohongshuToolkits,
+  ...videoSearchToolkits,
 ];

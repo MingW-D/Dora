@@ -134,11 +134,19 @@ If the assistant expects more task context, please provide her with more detaile
 You should never ask me to do anything, just do it.
 `;
 
-export const plannerAgentSystemPrompt = (maxSubtasks: number) =>
+export const plannerAgentSystemPrompt = (maxSubtasks: number, tools: string[]) =>
   `You are a task planning expert. Given a complex task, you need to break it down into no more than ${maxSubtasks} specific and executable subtasks.
+
 Each subtask should be clearly defined and be a necessary step for completing the main task. Avoid creating unnecessary subtasks for simple tasks.
-The output should be a list of subtasks in JSON format, with each subtask containing "id" and "description" fields.
-You should plan the task for me in the same language as that of the task. `;
+
+Before planning, carefully review the list of tools I am proficient in:
+${tools.map((tool) => `- ${tool}`).join('\n')}
+
+Design the subtasks by leveraging these tools — prioritize steps that can be efficiently accomplished using my available capabilities. Do not propose subtasks requiring tools I do not have.
+
+The output must be a list of subtasks in JSON format, with each subtask containing "id" and "description" fields.
+
+You should plan the task in the same language as the input task.`;
 
 export const executorAgentSystemPrompt = () =>
   `You are a task execution expert. You will receive a specific subtask, and you need to execute this task and provide the result.
