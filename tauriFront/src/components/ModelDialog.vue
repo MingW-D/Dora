@@ -17,26 +17,38 @@ const errorMessage = ref('');
 
 // 根据provider获取占位符
 function getModelNamePlaceholder() {
-  return modelStore.editingModel.provider === 'ollama' 
-    ? '如：llama2, qwen:7b, codellama' 
-    : '如：gpt-4, gpt-3.5-turbo';
+  if (modelStore.editingModel.provider === 'ollama') {
+    return '如：llama2, qwen:7b, codellama';
+  } else if (modelStore.editingModel.provider === 'modelscope') {
+    return '如：Qwen/Qwen3-Next-80B-A3B-Instruct, Qwen/Qwen2.5-7B-Instruct';
+  } else {
+    return '如：gpt-4, gpt-3.5-turbo';
+  }
 }
 
 function getApiUrlPlaceholder() {
-  return modelStore.editingModel.provider === 'ollama' 
-    ? '如：http://localhost:11434/v1' 
-    : '如：https://api.openai.com/v1/chat/completions';
+  if (modelStore.editingModel.provider === 'ollama') {
+    return '如：http://localhost:11434/v1';
+  } else if (modelStore.editingModel.provider === 'modelscope') {
+    return '如：https://api-inference.modelscope.cn/v1';
+  } else {
+    return '如：https://api.openai.com/v1/chat/completions';
+  }
 }
 
 // Provider变化时更新默认值
 function onProviderChange() {
   if (modelStore.editingModel.provider === 'ollama') {
-    if (!modelStore.editingModel.api_url || modelStore.editingModel.api_url.includes('openai.com')) {
+    if (!modelStore.editingModel.api_url || modelStore.editingModel.api_url.includes('openai.com') || modelStore.editingModel.api_url.includes('modelscope.cn')) {
       modelStore.editingModel.api_url = 'http://localhost:11434/v1';
     }
   } else if (modelStore.editingModel.provider === 'openai') {
-    if (!modelStore.editingModel.api_url || modelStore.editingModel.api_url.includes('localhost:11434')) {
+    if (!modelStore.editingModel.api_url || modelStore.editingModel.api_url.includes('localhost:11434') || modelStore.editingModel.api_url.includes('modelscope.cn')) {
       modelStore.editingModel.api_url = 'https://api.openai.com/v1/chat/completions';
+    }
+  } else if (modelStore.editingModel.provider === 'modelscope') {
+    if (!modelStore.editingModel.api_url || modelStore.editingModel.api_url.includes('openai.com') || modelStore.editingModel.api_url.includes('localhost:11434')) {
+      modelStore.editingModel.api_url = 'https://api-inference.modelscope.cn/v1';
     }
   }
 }
@@ -105,6 +117,7 @@ function cancelEdit() {
           >
             <option value="openai">OpenAI</option>
             <option value="ollama">Ollama</option>
+            <option value="modelscope">ModelScope</option>
           </select>
         </div>
         

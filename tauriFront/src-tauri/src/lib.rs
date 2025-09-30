@@ -4,8 +4,10 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-use tauri::{Manager, WindowEvent};
+// use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -121,26 +123,92 @@ pub fn run() {
         let _ = window.close();
     }
 
+    // HTTP代理命令
+    #[derive(Serialize, Deserialize)]
+    struct HttpRequest {
+        url: String,
+        method: String,
+        headers: Option<HashMap<String, String>>,
+        body: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct HttpResponse {
+        status: u16,
+        headers: HashMap<String, String>,
+        body: String,
+    }
+
+    #[tauri::command]
+    async fn http_request(
+        url: String,
+        method: String,
+        headers: Option<HashMap<String, String>>,
+        body: Option<String>
+    ) -> Result<HttpResponse, String> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        
+        let mut req_builder = match method.to_uppercase().as_str() {
+            "GET" => client.get(&url),
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "DELETE" => client.delete(&url),
+            _ => return Err(format!("Unsupported HTTP method: {}", method)),
+        };
+
+        // 添加请求头
+        if let Some(headers) = headers {
+            for (key, value) in headers {
+                req_builder = req_builder.header(&key, &value);
+            }
+        }
+
+        // 添加请求体
+        if let Some(body) = body {
+            req_builder = req_builder.body(body);
+        }
+
+        let response = req_builder.send().await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        let status = response.status().as_u16();
+        let headers: HashMap<String, String> = response.headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+
+        let body = response.text().await
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_shell::init())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations("sqlite:chat_history.db", migrations)
                 .build(),
         )
-        .setup(|app| {
-            // 获取主窗口
-            let main_window = app.get_webview_window("main").expect("找不到主窗口");
-
+        .setup(|_app| {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             greet,
             minimize_window,
             toggle_maximize_window,
-            close_window
+            close_window,
+            http_request
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

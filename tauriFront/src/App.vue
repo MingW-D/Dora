@@ -14,6 +14,7 @@ import MCPToolsManager from './components/MCPToolsManager.vue';
 import StudioPane from './components/StudioPane.vue';
 
 import SubTaskDisplay from './components/SubTaskDisplay.vue';
+import DiscoverPage from './components/DiscoverPage.vue';
 import { studioBus, type StudioAction } from './services/studioBus';
 import { parseMessage, isCodeBlock, isMarkdownBlock } from './utils/messageParser';
 import { initWindowControls } from './services/windowControl';
@@ -38,7 +39,7 @@ const minSidebarWidth = 200; // 最小宽度
 const isDragging = ref(false);
 
 // 视图控制
-const currentView = ref('chat'); // 'chat' or 'mcp'
+const currentView = ref('chat'); // 'chat', 'mcp', or 'discover'
 
 // 对话数据
 const chatList = ref<Conversation[]>([]);
@@ -94,6 +95,10 @@ function getCumulativeTotalForMessage(messageId: string): number {
 // 添加编辑消息相关的状态
 const editingMessageId = ref<string | null>(null);
 const editingContent = ref('');
+
+// 复制提示状态
+const copySuccessVisible = ref(false);
+const copySuccessTimer = ref<number | null>(null);
 
 // 计划步骤折叠状态管理
 const collapsedPlanSteps = ref(new Map<string, boolean>()); // messageId -> collapsed state
@@ -177,6 +182,147 @@ function handleDragEnd() {
 // 打开MCP工具管理器
 function openMcpManager() {
   currentView.value = 'mcp';
+}
+
+// 打开发现页面
+function openDiscover() {
+  currentView.value = 'discover';
+}
+
+// 当前选中的Agent
+const selectedAgent = ref<any>(null);
+
+// 使用选中的单个Agent进行对话
+async function useSelectedAgent(
+  agent: any,
+  question: string,
+  aiMessageId: string,
+  conversationId: string,
+  abortSignal: AbortSignal
+): Promise<string> {
+  try {
+    let fullResponse = '';
+    
+    // 根据agent类型动态导入对应的agent类
+    let AgentClass: any = null;
+    
+    switch (agent.id) {
+      case 'dialogue':
+        const { DialogueAgent } = await import('./apps/agent/dialogue-agent');
+        AgentClass = DialogueAgent;
+        break;
+      case 'task-oriented':
+        const { TaskOrientedAgent } = await import('./apps/agent/task-oriented-agent');
+        AgentClass = TaskOrientedAgent;
+        break;
+      case 'video-search':
+        const { VideoAgent } = await import('./apps/toolkits/video-toolkit/video-agent');
+        AgentClass = VideoAgent;
+        break;
+      case 'code-generator':
+        const { CodeGeneratorAgent } = await import('./apps/toolkits/code-toolkit/code-generator');
+        AgentClass = CodeGeneratorAgent;
+        break;
+      case 'document-analyzer':
+        // 文档分析器是一个通用工具，这里使用基础的BaseAgent
+        const { BaseAgent } = await import('./apps/agent/base-agent');
+        AgentClass = BaseAgent;
+        break;
+      case 'web-search':
+        const { createSearchAgent } = await import('./apps/toolkits/search-toolkit/search-agent-factory');
+        const { BaiduSearchConfig } = await import('./apps/toolkits/search-toolkit/baidu-search-agent');
+        AgentClass = createSearchAgent(BaiduSearchConfig);
+        break;
+      case 'chart-creator':
+        const { ChartAgent } = await import('./apps/toolkits/chart-toolkit/chart-agent');
+        AgentClass = ChartAgent;
+        break;
+      case 'html-reporter':
+        const { HtmlReportAgent } = await import('./apps/toolkits/html-report-toolkit/html-report-agent');
+        AgentClass = HtmlReportAgent;
+        break;
+      default:
+        // 默认使用对话agent
+        const { DialogueAgent: DefaultAgent } = await import('./apps/agent/dialogue-agent');
+        AgentClass = DefaultAgent;
+    }
+    
+    if (!AgentClass) {
+      throw new Error(`Unknown agent type: ${agent.id}`);
+    }
+    
+    // 创建agent实例
+    const agentInstance = new AgentClass();
+    
+    // 创建任务引用对象
+    const taskRef = {
+      conversationId,
+      uiMessageId: aiMessageId,
+      abortSignal,
+      studio: null, // 暂时设为null，如果需要可以传入
+      observer: null, // 暂时设为null
+      createTaskMessage: async () => ({ id: uuidv4(), content: '', role: 'ASSISTANT' as const, conversationId, status: 'PENDING' as const, task: null }),
+      completeTaskMessage: async () => {},
+      createMessage: async () => ({ id: uuidv4(), content: '', role: 'ASSISTANT' as const, conversationId, status: 'PENDING' as const, task: null }),
+      completeMessage: async () => {}
+    };
+    
+    // 如果是SpecializedToolAgent，使用execute方法
+    if (agentInstance.execute && typeof agentInstance.execute === 'function') {
+      const result = await agentInstance.execute({ question }, taskRef);
+      fullResponse = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+    } else {
+      // 否则使用BaseAgent的对话方法
+      const messages = [
+        { role: 'system' as const, content: `你是${agent.name}，${agent.description}` },
+        { role: 'user' as const, content: question }
+      ];
+      
+      const response = await agentInstance.chat(messages, abortSignal);
+      fullResponse = response.content || response;
+    }
+    
+    // 更新消息内容
+    await updateMessageInConversation(conversationId, aiMessageId, fullResponse, true);
+    
+    return fullResponse;
+  } catch (error) {
+    console.error('使用选中Agent失败:', error);
+    const errorMessage = `抱歉，${agent.name}处理您的请求时出现了错误：${(error as Error).message || '未知错误'}`;
+    await updateMessageInConversation(conversationId, aiMessageId, errorMessage, true);
+    return errorMessage;
+  }
+}
+
+// 选择Agent并开始对话
+async function selectAgent(agent: any) {
+  try {
+    // 创建新对话
+    await createNewChat();
+    
+    // 设置当前选中的agent
+    selectedAgent.value = agent;
+    
+    // 切换到聊天视图
+    currentView.value = 'chat';
+    
+    // 显示欢迎消息
+    const welcomeMessage = {
+      id: uuidv4(),
+      conversation_id: currentChatId.value,
+      role: 'assistant' as const,
+      content: `您好！我是 ${agent.name}，${agent.description}\n\n请告诉我您需要什么帮助，我会使用专门的能力为您服务。`,
+      timestamp: Date.now()
+    };
+    
+    currentMessages.value.push(welcomeMessage);
+    await cacheManager.addMessage(currentChatId.value, welcomeMessage);
+    
+    // 滚动到底部
+    scrollToBottom();
+  } catch (error) {
+    console.error('选择Agent失败:', error);
+  }
 }
 
 // 手动停止当前会话的生成
@@ -471,7 +617,7 @@ async function sendMessage() {
   }
 }
 
-// 生成AI回复（带记忆）- 直接调用多智能体框架
+// 生成AI回复（带记忆）- 根据选中的agent使用不同的处理方式
 async function generateAIResponse(
   question: string,
   aiMessageId: string,
@@ -488,23 +634,29 @@ async function generateAIResponse(
     // 监听取消
     const onAbort = () => {
       try { 
-        // ConversionActorAgent内部会处理取消逻辑
+        // Agent内部会处理取消逻辑
       } catch {}
     };
     abortSignal.addEventListener('abort', onAbort, { once: true });
 
     try {
-      // 创建ConversionActorAgent实例，传入现有的消息ID
-      console.log(`[App.vue] Creating ConversionActorAgent with aiMessageId: ${aiMessageId}`);
-      const { ConversionActorAgent } = await import('./apps/agent/conversion-actor-agent');
-      const agent = new ConversionActorAgent(conversationId, abortSignal, aiMessageId);
-      console.log(`[App.vue] ConversionActorAgent created successfully`);
-      
-      // 启动多智能体处理，直接传入任务
-      const observer = await agent.start(question);
-      
-      // 监听流式输出
-      const subscription = observer.subscribe({
+      // 如果选择了特定的agent，使用单个agent处理
+      if (selectedAgent.value) {
+        console.log(`[App.vue] Using selected agent: ${selectedAgent.value.id}`);
+        fullResponse = await useSelectedAgent(selectedAgent.value, question, aiMessageId, conversationId, abortSignal);
+        return fullResponse; // 直接返回单个agent的结果
+      } else {
+        // 否则使用多智能体框架
+        console.log(`[App.vue] Creating ConversionActorAgent with aiMessageId: ${aiMessageId}`);
+        const { ConversionActorAgent } = await import('./apps/agent/conversion-actor-agent');
+        const agent = new ConversionActorAgent(conversationId, abortSignal, aiMessageId);
+        console.log(`[App.vue] ConversionActorAgent created successfully`);
+        
+        // 启动多智能体处理，直接传入任务
+        const observer = await agent.start(question);
+        
+        // 监听流式输出
+        const subscription = observer.subscribe({
         next: (messageStream) => {
           if (abortSignal.aborted) return;
           
@@ -780,11 +932,12 @@ async function generateAIResponse(
       // 最终更新：存储完整的聚合内容块数组
       const finalAggregatedContent = JSON.stringify(blocks);
       console.log(`[App.vue] Final update - blocks count: ${blocks.length}, content length: ${finalAggregatedContent.length}`);
-      if (finalAggregatedContent && finalAggregatedContent !== '[]') {
-        await updateMessageInConversation(conversationId, aiMessageId, finalAggregatedContent, true);
+        if (finalAggregatedContent && finalAggregatedContent !== '[]') {
+          await updateMessageInConversation(conversationId, aiMessageId, finalAggregatedContent, true);
+        }
+        await cacheManager.forceSyncAll();
+        return fullResponse; // 返回文本内容用于错误显示
       }
-      await cacheManager.forceSyncAll();
-      return fullResponse; // 返回文本内容用于错误显示
     } finally {
       abortSignal.removeEventListener('abort', onAbort);
     }
@@ -1167,7 +1320,9 @@ async function copyMessage(msg: Message) {
         case 'tool_call':
           return `[工具调用] ${String((b as any).content || '')}`;
         case 'tool_message':
-          return `[工具消息]\n` + (typeof (b as any).content === 'string' ? (b as any).content : JSON.stringify((b as any).content, null, 2));
+          const toolResult = (b as any).result || (b as any).content || '';
+          const toolName = (b as any).toolName || 'Tool';
+          return `[${toolName}]\n` + (typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult, null, 2));
         case 'url_links':
           return (Array.isArray((b as any).content) ? (b as any).content : []).join('\n');
         case 'plan_steps':
@@ -1188,9 +1343,29 @@ async function copyMessage(msg: Message) {
     }).join('\n');
 
     await navigator.clipboard.writeText(plain);
+    
+    // 显示复制成功提示
+    showCopySuccess();
   } catch (error) {
     console.error('复制失败:', error);
   }
+}
+
+// 显示复制成功提示
+function showCopySuccess() {
+  // 清除之前的定时器
+  if (copySuccessTimer.value) {
+    clearTimeout(copySuccessTimer.value);
+  }
+  
+  // 显示提示
+  copySuccessVisible.value = true;
+  
+  // 2秒后自动隐藏
+  copySuccessTimer.value = window.setTimeout(() => {
+    copySuccessVisible.value = false;
+    copySuccessTimer.value = null;
+  }, 2000);
 }
 
 function previewTask(_msg: Message, cblock: MessageContentBlock) {
@@ -1378,6 +1553,184 @@ function openUrlInStudio(url: string) {
 // 将函数暴露到全局，供HTML onclick使用
 if (typeof window !== 'undefined') {
   (window as any).openUrlInStudio = openUrlInStudio;
+}
+
+// 视频播放器状态管理
+const selectedVideoState = ref(new Map<string, { videoIndex: number; linkType: 'original' | 'pojie'; pojieIndex?: number }>());
+
+// 获取当前选中的视频URL
+function getSelectedVideoUrl(cblock: MessageContentBlock): string {
+  const blockId = (cblock as any).id || 'default';
+  const state = selectedVideoState.value.get(blockId);
+  
+  if (!state || !(cblock as any).result?.allVideos?.[state.videoIndex]) {
+    // 默认选择第一个视频的原始链接
+    const firstVideo = (cblock as any).result?.allVideos?.[0];
+    return firstVideo?.playUrl || '';
+  }
+  
+  const video = (cblock as any).result.allVideos[state.videoIndex];
+  
+  if (state.linkType === 'original') {
+    return video.playUrl || '';
+  } else if (state.linkType === 'pojie' && state.pojieIndex !== undefined) {
+    const pojieLinks = (cblock as any).result?.pojieVideos?.[state.videoIndex];
+    return pojieLinks?.[state.pojieIndex] || video.playUrl || '';
+  }
+  
+  return video.playUrl || '';
+}
+
+// 获取当前选中的视频标题
+function getSelectedVideoTitle(cblock: MessageContentBlock): string {
+  const blockId = (cblock as any).id || 'default';
+  const state = selectedVideoState.value.get(blockId);
+  
+  if (!state || !(cblock as any).result?.allVideos?.[state.videoIndex]) {
+    const firstVideo = (cblock as any).result?.allVideos?.[0];
+    return firstVideo?.title || '未知视频';
+  }
+  
+  const video = (cblock as any).result.allVideos[state.videoIndex];
+  return video.title || '未知视频';
+}
+
+// 获取当前选中的视频平台
+function getSelectedVideoPlatform(cblock: MessageContentBlock): string {
+  const blockId = (cblock as any).id || 'default';
+  const state = selectedVideoState.value.get(blockId);
+  
+  if (!state || !(cblock as any).result?.allVideos?.[state.videoIndex]) {
+    const firstVideo = (cblock as any).result?.allVideos?.[0];
+    return firstVideo?.platform || '未知平台';
+  }
+  
+  const video = (cblock as any).result.allVideos[state.videoIndex];
+  return video.platform || '未知平台';
+}
+
+// 播放指定视频
+function playVideo(cblock: MessageContentBlock, videoIndex: number, linkType: 'original' | 'pojie', pojieIndex?: number) {
+  const blockId = (cblock as any).id || 'default';
+  selectedVideoState.value.set(blockId, {
+    videoIndex,
+    linkType,
+    pojieIndex
+  });
+}
+
+// 检查视频链接是否为当前选中状态
+function isVideoActive(cblock: MessageContentBlock, videoIndex: number, linkType: 'original' | 'pojie', pojieIndex?: number): boolean {
+  const blockId = (cblock as any).id || 'default';
+  const state = selectedVideoState.value.get(blockId);
+  
+  if (!state) {
+    // 默认第一个视频的原始链接为激活状态
+    return videoIndex === 0 && linkType === 'original';
+  }
+  
+  return state.videoIndex === videoIndex && 
+         state.linkType === linkType && 
+         (linkType === 'original' || state.pojieIndex === pojieIndex);
+}
+
+// 判断是否应该使用iframe
+function shouldUseIframe(url: string): boolean {
+  if (!url) return false;
+  
+  // 对于破解链接，使用iframe
+  if (url.includes('jx.xymp4.cc') || url.includes('jx.xmflv.com') || url.includes('8090g.cn')) {
+    return true;
+  }
+  
+  // 对于腾讯视频、爱奇艺、优酷等，也使用iframe
+  if (url.includes('v.qq.com') || url.includes('iqiyi.com') || url.includes('youku.com')) {
+    return true;
+  }
+  
+  return false;
+}
+
+// 获取iframe URL
+function getIframeUrl(url: string): string {
+  if (!url) return '';
+  
+  // 对于破解链接，直接使用
+  if (url.includes('jx.xymp4.cc') || url.includes('jx.xmflv.com') || url.includes('8090g.cn')) {
+    return url;
+  }
+  
+  // 对于其他视频网站，可能需要特殊处理
+  return url;
+}
+
+// 处理视频加载错误
+function handleVideoError(event: Event) {
+  console.error('视频加载失败:', event);
+  
+  // 尝试获取视频元素或iframe元素
+  const element = event.target as HTMLVideoElement | HTMLIFrameElement;
+  if (element) {
+    // 显示错误信息
+    const errorMsg = document.createElement('div');
+    errorMsg.className = 'video-error-message';
+    errorMsg.innerHTML = `
+      <div style="padding: 20px; text-align: center; background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; color: #dc2626;">
+        <p style="margin: 0 0 8px; font-weight: 500;">视频加载失败</p>
+        <p style="margin: 0; font-size: 14px;">请尝试点击下方的其他链接，或直接访问：</p>
+        <a href="${element.src || element.getAttribute('src')}" target="_blank" style="color: #2563eb; text-decoration: underline; margin-top: 8px; display: inline-block;">
+          在新窗口中打开
+        </a>
+      </div>
+    `;
+    
+    // 替换元素
+    element.parentNode?.replaceChild(errorMsg, element);
+  }
+}
+
+// 获取工具消息结果的格式化内容
+function getToolMessageResult(cblock: MessageContentBlock): string {
+  try {
+    const rawResult = (cblock as any)?.result || (cblock as any)?.content || '';
+    
+    // 如果是字符串，尝试解析JSON
+    if (typeof rawResult === 'string') {
+      try {
+        const parsed = JSON.parse(rawResult);
+        // 如果解析成功且有message字段，优先显示message
+        if (parsed && typeof parsed === 'object') {
+          if (parsed.message) {
+            return String(parsed.message);
+          }
+          if (parsed.summary) {
+            return String(parsed.summary);
+          }
+          // 否则格式化整个对象
+          return JSON.stringify(parsed, null, 2);
+        }
+      } catch {
+        // JSON解析失败，直接返回原字符串
+        return rawResult;
+      }
+    }
+    
+    // 如果是对象，直接格式化
+    if (typeof rawResult === 'object') {
+      if (rawResult.message) {
+        return String(rawResult.message);
+      }
+      if (rawResult.summary) {
+        return String(rawResult.summary);
+      }
+      return JSON.stringify(rawResult, null, 2);
+    }
+    
+    return String(rawResult);
+  } catch (error) {
+    console.error('Error formatting tool message result:', error);
+    return String((cblock as any)?.result || (cblock as any)?.content || '');
+  }
 }
 
 // 格式化工具参数，提取主要内容
@@ -1719,6 +2072,10 @@ async function saveAndResendMessage() {
       
       <div class="chat-list" v-if="!isSidebarCollapsed">
         <div class="sidebar-actions">
+          <button class="discover-btn" @click="openDiscover">
+            <span class="icon">🔍</span>
+            <span class="text">发现</span>
+          </button>
           <button class="mcp-tool-btn" @click="openMcpManager">
             <span class="icon">🔧</span>
             <span class="text">MCP工具</span>
@@ -1761,6 +2118,7 @@ async function saveAndResendMessage() {
     <!-- 主内容区 -->
     <div class="main-content">
       <MCPToolsManager v-if="currentView === 'mcp'" />
+      <DiscoverPage v-else-if="currentView === 'discover'" @select-agent="selectAgent" />
       <div v-else-if="currentChatId || currentMessages.length > 0" class="chat-container">
         <div class="chat-header">
           <div class="chat-title">
@@ -1924,23 +2282,75 @@ async function saveAndResendMessage() {
             </div>
           </template>
           <template v-else-if="cblock.type === 'assistant_agent'">
-            <div class="assistant-agent-block" :class="{ collapsed: isAssistantAgentCollapsed(cblock.id || `assistant_agent_${index}`) }">
-              <div 
-                class="assistant-agent-header" 
-                @click="toggleAssistantAgentCollapse(cblock.id || `assistant_agent_${index}`)"
-              >
-                <span class="assistant-agent-collapse-icon">
-                  {{ isAssistantAgentCollapsed(cblock.id || `assistant_agent_${index}`) ? '▶' : '▼' }}
-                </span>
-                <span v-if="isAssistantAgentCollapsed(cblock.id || `assistant_agent_${index}`)" class="assistant-agent-preview">
-                  {{ String(cblock.content || '').substring(0, 50) }}{{ String(cblock.content || '').length > 50 ? '...' : '' }}
-                </span>
+            <!-- Hide assistant_agent blocks - do not render anything -->
+          </template>
+          <template v-else-if="cblock.type === 'video_search'">
+            <div class="video-search-block">
+              <div class="video-search-header">
+                <span class="video-icon">🎬</span>
+                <span class="video-count">{{ ((cblock as any).result?.allVideos || []).length }} 个视频</span>
               </div>
-              <div class="assistant-agent-content" v-show="!isAssistantAgentCollapsed(cblock.id || `assistant_agent_${index}`)">
-                <div class="assistant-agent-text" v-html="formatTextWithUrls(String(cblock.content || ''))">
+              <div class="video-player-container" v-if="((cblock as any).result?.allVideos || []).length > 0">
+                <div class="video-player">
+                  <!-- 尝试使用iframe嵌入，如果失败则回退到video标签 -->
+                  <iframe 
+                    v-if="shouldUseIframe(getSelectedVideoUrl(cblock))"
+                    :src="getIframeUrl(getSelectedVideoUrl(cblock))"
+                    class="video-iframe"
+                    frameborder="0"
+                    allowfullscreen
+                    @error="handleVideoError"
+                  ></iframe>
+                  <video 
+                    v-else
+                    ref="videoPlayer"
+                    controls 
+                    class="video-element"
+                    :src="getSelectedVideoUrl(cblock)"
+                    @error="handleVideoError"
+                  >
+                    您的浏览器不支持视频播放。
+                  </video>
+                </div>
+                <div class="video-links-section">
+                  <h5>可用链接：</h5>
+                  <div class="video-links-grid">
+                    <div v-for="(video, vIndex) in ((cblock as any).result?.allVideos || [])" :key="vIndex" class="video-link-item">
+                      <div class="video-link-header">
+                        <span class="video-link-title">{{ video.title }}</span>
+                        <span class="video-link-platform">{{ video.platform }}</span>
+                      </div>
+                      <div class="video-link-buttons">
+                        <button 
+                          class="video-link-btn original"
+                          @click="playVideo(cblock, vIndex, 'original')"
+                          :class="{ active: isVideoActive(cblock, vIndex, 'original') }"
+                        >
+                          原始链接
+                        </button>
+                        <div v-if="((cblock as any).result?.pojieVideos?.[vIndex] || []).length > 0" class="pojie-links">
+                          <button 
+                            v-for="(_, pIndex) in ((cblock as any).result?.pojieVideos?.[vIndex] || [])" 
+                            :key="pIndex"
+                            class="video-link-btn pojie"
+                            @click="playVideo(cblock, vIndex, 'pojie', pIndex)"
+                            :class="{ active: isVideoActive(cblock, vIndex, 'pojie', pIndex) }"
+                          >
+                            破解链接{{ pIndex + 1 }}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
+              <div v-else class="no-videos">
+                没有找到视频结果
+              </div>
             </div>
+          </template>
+          <template v-else-if="cblock.type === 'tool_message'">
+            <!-- Hide tool_message blocks - do not render anything -->
           </template>
         </template>
       </div>
@@ -2092,6 +2502,16 @@ async function saveAndResendMessage() {
 
     <!-- 新增：开发者日志面板 -->
     <LogPanel />
+    
+    <!-- 复制成功提示 -->
+    <div v-if="copySuccessVisible" class="copy-success-toast">
+      <div class="copy-success-content">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+        </svg>
+        <span>复制成功</span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -3027,8 +3447,12 @@ async function saveAndResendMessage() {
 
 .sidebar-actions {
   padding: 0 8px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
+.discover-btn,
 .mcp-tool-btn {
   width: 100%;
   padding: 8px 16px;
@@ -3045,11 +3469,25 @@ async function saveAndResendMessage() {
   transition: all 0.3s;
 }
 
+.discover-btn {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
+  border-color: rgba(99, 102, 241, 0.3);
+  color: #6366f1;
+}
+
+.discover-btn:hover {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2));
+  border-color: #6366f1;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2);
+}
+
 .mcp-tool-btn:hover {
   background-color: var(--hover-bg);
   border-color: var(--primary-color);
 }
 
+.discover-btn .icon,
 .mcp-tool-btn .icon {
   font-size: 16px;
 }
@@ -3724,5 +4162,374 @@ async function saveAndResendMessage() {
   border-radius: 8px;
   overflow-x: auto;
   margin: 12px 0;
+}
+
+/* 复制成功提示样式 */
+.copy-success-toast {
+  position: fixed;
+  top: 30%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 9999;
+  pointer-events: none;
+  animation: copySuccessFadeIn 0.3s ease-out;
+}
+
+.copy-success-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, rgba(196, 181, 253, 0.95), rgba(167, 139, 250, 0.95));
+  color: white;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(196, 181, 253, 0.4);
+  backdrop-filter: blur(8px);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.copy-success-content svg {
+  flex-shrink: 0;
+}
+
+@keyframes copySuccessFadeIn {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+/* 暗色模式下的复制成功提示 */
+@media (prefers-color-scheme: dark) {
+  .copy-success-content {
+    background: linear-gradient(135deg, rgba(196, 181, 253, 0.9), rgba(167, 139, 250, 0.9));
+    color: white;
+    box-shadow: 0 8px 32px rgba(196, 181, 253, 0.5);
+  }
+}
+
+/* Tool message 特定样式 */
+.tool-message-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.tool-status-badge {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.tool-status-badge.completed {
+  background-color: rgba(16, 185, 129, 0.1);
+  color: #059669;
+}
+
+.tool-status-badge.running {
+  background-color: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+}
+
+.tool-status-badge.failed {
+  background-color: rgba(239, 68, 68, 0.1);
+  color: #dc2626;
+}
+
+/* Tool message 内容样式 */
+.tool-message-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tool-parameters {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background-color: rgba(99, 102, 241, 0.05);
+  padding: 6px 8px;
+  border-radius: 4px;
+  border-left: 2px solid rgba(99, 102, 241, 0.3);
+}
+
+.tool-result {
+  flex: 1;
+}
+
+.tool-parameters strong {
+  color: var(--text-primary);
+}
+
+/* 视频搜索结果样式 */
+.video-search-block {
+  border: 2px solid #3b82f6;
+  border-radius: 12px;
+  margin: 16px 0;
+  overflow: hidden;
+  background-color: #ffffff;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.1);
+}
+
+.video-search-header {
+  padding: 16px;
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  border-bottom: 1px solid #dbeafe;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.video-icon {
+  font-size: 24px;
+}
+
+.video-title {
+  font-weight: 600;
+  font-size: 16px;
+  color: #1e40af;
+  flex: 1;
+}
+
+.video-count {
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 13px;
+  background-color: #3b82f6;
+  color: white;
+  font-weight: 500;
+}
+
+.video-player-container {
+  padding: 20px;
+}
+
+.video-player {
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto 16px;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  position: relative;
+  background-color: #000;
+}
+
+.video-element {
+  width: 100%;
+  height: 450px;
+  object-fit: contain;
+  background-color: #000;
+  display: block;
+}
+
+.video-iframe {
+  width: 100%;
+  height: 450px;
+  border: none;
+  background-color: #000;
+  display: block;
+}
+
+.video-info {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.video-info h4 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.video-platform {
+  margin: 0;
+  font-size: 14px;
+  color: #6b7280;
+  background-color: #f3f4f6;
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 12px;
+}
+
+.video-links-section {
+  border-top: 1px solid #e5e7eb;
+  padding-top: 20px;
+}
+
+.video-links-section h5 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.video-links-grid {
+  display: grid;
+  gap: 16px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.video-link-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  background-color: #f9fafb;
+  transition: all 0.2s ease;
+}
+
+.video-link-item:hover {
+  border-color: #3b82f6;
+  background-color: #f0f9ff;
+}
+
+.video-link-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  gap: 12px;
+}
+
+.video-link-title {
+  font-weight: 500;
+  color: #1f2937;
+  flex: 1;
+  line-height: 1.4;
+}
+
+.video-link-platform {
+  font-size: 12px;
+  color: #6b7280;
+  background-color: #e5e7eb;
+  padding: 2px 8px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.video-link-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pojie-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.video-link-btn {
+  padding: 6px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background-color: #ffffff;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.video-link-btn:hover {
+  border-color: #3b82f6;
+  background-color: #f0f9ff;
+  color: #1d4ed8;
+}
+
+.video-link-btn.active {
+  background-color: #3b82f6;
+  border-color: #3b82f6;
+  color: white;
+}
+
+.video-link-btn.original {
+  border-color: #059669;
+  color: #059669;
+}
+
+.video-link-btn.original:hover {
+  background-color: #ecfdf5;
+  border-color: #059669;
+}
+
+.video-link-btn.original.active {
+  background-color: #059669;
+  border-color: #059669;
+  color: white;
+}
+
+.video-link-btn.pojie {
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
+
+.video-link-btn.pojie:hover {
+  background-color: #fffbeb;
+  border-color: #f59e0b;
+}
+
+.video-link-btn.pojie.active {
+  background-color: #f59e0b;
+  border-color: #f59e0b;
+  color: white;
+}
+
+.no-videos {
+  padding: 40px 20px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 16px;
+  background-color: #f9fafb;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .video-player {
+    max-width: 100%;
+    margin: 0 0 16px;
+  }
+  
+  .video-element,
+  .video-iframe {
+    height: 300px;
+  }
+  
+  .video-link-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  
+  .video-link-buttons {
+    justify-content: flex-start;
+  }
+  
+  .video-links-grid {
+    max-height: 300px;
+  }
+}
+
+@media (max-width: 480px) {
+  .video-element,
+  .video-iframe {
+    height: 250px;
+  }
+  
+  .video-player-container {
+    padding: 10px;
+  }
 }
 </style>

@@ -41,7 +41,32 @@ export const loadSdkAndModel = async (currentModelId?: string): Promise<Record<M
     apiKey = 'ollama';
   }
 
-  const sdk = new OpenAI({ apiKey, baseURL, dangerouslyAllowBrowser: true });
+  // 为ModelScope API创建自定义fetch函数，移除有问题的请求头
+  const customFetch = provider === 'modelscope' ? async (url: string, init?: RequestInit) => {
+    if (init?.headers) {
+      // 移除所有可能导致CORS问题的x-stainless-*请求头
+      const headers = new Headers(init.headers);
+      
+      // 获取所有请求头名称并删除以x-stainless-开头的
+      const headerNames = Array.from(headers.keys());
+      headerNames.forEach(headerName => {
+        if (headerName.toLowerCase().startsWith('x-stainless-')) {
+          headers.delete(headerName);
+        }
+      });
+      
+      console.log('headers after cleanup', headers);
+      init.headers = headers;
+    }
+    return fetch(url, init);
+  } : undefined;
+
+  const sdk = new OpenAI({ 
+    apiKey, 
+    baseURL, 
+    dangerouslyAllowBrowser: true,
+    fetch: customFetch
+  });
 
   return {
     TEXT: { sdk, model: modelName, provider },

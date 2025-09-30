@@ -105,13 +105,18 @@ export class DialogueAgent extends BaseAgent implements SpecializedToolAgent {
 
     let messageModel = await taskRef.createMessage('User Agent');
     
-    // 创建user_agent类型的内容块
-    const userAgentBlock = {
+    // 创建user_agent类型的内容块，直接包含 subtaskId
+    const userAgentBlock: any = {
       type: 'user_agent',
       content: '',
       timestamp: Date.now(),
       id: `user_agent_${Date.now()}`
     };
+    
+    // 直接添加 subtaskId 到内容块中
+    if (taskRef.subtaskId !== undefined) {
+      userAgentBlock.subtaskId = taskRef.subtaskId;
+    }
     
     // 将user_agent块添加到消息内容中
     try {
@@ -169,9 +174,9 @@ export class DialogueAgent extends BaseAgent implements SpecializedToolAgent {
       },
     });
 
-    let userAgentContent = await lastValueFrom(
-      userAgentCompletion.contentStream.pipe(defaultIfEmpty(''))
-    );
+    // 等待流完全处理完成后再获取完整内容
+    let userAgentContent = await userAgentCompletion.getFullContent();
+    console.log('userAgentContent', userAgentContent);
 
     if (userAgentContent.toUpperCase().includes('TASK_DONE')) {
       userAgentContent += toFinalAnswerPrompt(query.question);
@@ -186,13 +191,18 @@ export class DialogueAgent extends BaseAgent implements SpecializedToolAgent {
 
     messageModel = await taskRef.createMessage('Assistant Agent');
     
-    // 创建assistant_agent类型的内容块
-    const assistantAgentBlock = {
+    // 创建assistant_agent类型的内容块，直接包含 subtaskId
+    const assistantAgentBlock: any = {
       type: 'assistant_agent',
       content: '',
       timestamp: Date.now(),
       id: `assistant_agent_${Date.now()}`
     };
+    
+    // 直接添加 subtaskId 到内容块中
+    if (taskRef.subtaskId !== undefined) {
+      assistantAgentBlock.subtaskId = taskRef.subtaskId;
+    }
     
     // 将assistant_agent块添加到消息内容中
     try {

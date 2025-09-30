@@ -1,8 +1,9 @@
 import { BaseAgent } from '../../agent/base-agent';
 import type { AgentTaskRef } from '../../agent/type';
 import type { SpecializedToolAgent } from '../types';
-import axios from 'axios';
+import { smartHttpRequest } from '../../../utils/tauriHttp';
 import xhsvmScript from './xhsvm.js?raw';
+import { Command } from '@tauri-apps/plugin-shell';
 
 
 
@@ -35,7 +36,17 @@ class XhsApi {
   private _cookie: string;
   private _base_url = 'https://edith.xiaohongshu.com';
   private _defaultHeaders: Record<string, string> = {
+    'accept': 'application/json, text/plain, */*',
+    'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
     'content-type': 'application/json;charset=UTF-8',
+    'origin': 'https://www.xiaohongshu.com',
+    'referer': 'https://www.xiaohongshu.com/',
+    'sec-ch-ua': '"Chromium";v="135", "Not(A:Brand";v="24", "Google Chrome";v="135"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"macOS"',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-site',
     'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
   };
 
@@ -69,18 +80,62 @@ class XhsApi {
   ): Promise<any> {
     const { method = 'GET', headers = {}, params, data } = options;
 
-    const res = await axios.request({
-      url: `${this._base_url}${uri}`,
+    // 构建完整URL，包含查询参数
+    let fullUrl = `${this._base_url}${uri}`;
+    if (params) {
+      const searchParams = new URLSearchParams();
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== null) {
+          searchParams.append(key, String(value));
+        }
+      });
+      const paramString = searchParams.toString();
+      if (paramString) {
+        fullUrl += `?${paramString}`;
+      }
+    }
+
+    const requestHeaders = {
+      ...this._defaultHeaders,
+      Cookie: this._cookie,
+      ...headers
+    };
+
+    // 调试日志
+    console.log('=== XHS API 请求 ===');
+    console.log('URL:', fullUrl);
+    console.log('Method:', method);
+    console.log('Headers:', requestHeaders);
+    if (data) {
+      console.log('Body:', JSON.stringify(data, null, 2));
+    }
+
+    // 使用 smartHttpRequest 替换 axios，避免CORS问题
+    const response = await smartHttpRequest({
+      url: fullUrl,
       method,
-      headers: {
-        ...this._defaultHeaders,
-        Cookie: this._cookie,
-        ...headers
-      },
-      params,
-      data
+      headers: requestHeaders,
+      body: data ? JSON.stringify(data) : undefined
     });
-    return res.data;
+
+    console.log('=== XHS API 响应 ===');
+    console.log('Status:', response.status);
+    console.log('Body:', response.body.substring(0,2000) + '...'); // 只打印前500字符
+
+    // 检查响应状态
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`HTTP请求失败: ${response.status}`);
+    }
+
+    // 解析响应体
+    try {
+      const parsed = JSON.parse(response.body);
+      return parsed;
+    } catch (error) {
+      console.error('解析响应JSON失败:', error);
+      console.error('响应内容:', response.body);
+      return response.body;
+    }
   }
 
   private base36encodeBigInt(number: bigint, alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'): string {
@@ -107,15 +162,53 @@ class XhsApi {
   private ensureGetXsXtLoaded() {
     if (this._getXsXtFn) return;
     try {
-      // 在隔离作用域执行脚本并返回 GetXsXt
-      const factory = new Function(
-        `${xhsvmScript}; return (typeof GetXsXt !== 'undefined') ? GetXsXt : (typeof window !== 'undefined' ? (window as any).GetXsXt : undefined);`
-      );
-      const fn = factory();
-      if (typeof fn !== 'function') {
-        throw new Error('GetXsXt not found in xhsvm.js');
+      // 由于xhsvm.js是为Node.js环境设计的，需要特殊处理
+      if (typeof window !== 'undefined') {
+        // 检查是否已经加载过
+        if ((window as any).__XHS_GetXsXt && typeof (window as any).__XHS_GetXsXt === 'function') {
+          this._getXsXtFn = (window as any).__XHS_GetXsXt;
+          console.log('使用已加载的 GetXsXt 函数');
+          return;
+        }
+        
+        try {
+          // 修改xhsvm.js脚本，使其兼容浏览器环境
+          // 将第一行的 "window = global" 替换为兼容性代码
+          let modifiedScript = xhsvmScript;
+          
+          // 替换第一行，使其在浏览器环境中兼容
+          modifiedScript = modifiedScript.replace(
+            /^window\s*=\s*global/m,
+            'var global = (typeof global !== "undefined") ? global : window;'
+          );
+          
+          // 删除或注释掉 "delete global" 和 "delete Buffer"
+          modifiedScript = modifiedScript.replace(/^delete\s+global/m, '// delete global');
+          modifiedScript = modifiedScript.replace(/^delete\s+Buffer/m, '// delete Buffer');
+          
+          // 在全局作用域执行修改后的脚本
+          const scriptElement = document.createElement('script');
+          scriptElement.textContent = modifiedScript;
+          scriptElement.id = 'xhsvm-script-modified';
+          document.head.appendChild(scriptElement);
+          
+          // 检查GetXsXt函数是否可用
+          if ((window as any).GetXsXt && typeof (window as any).GetXsXt === 'function') {
+            this._getXsXtFn = (window as any).GetXsXt;
+            (window as any).__XHS_GetXsXt = this._getXsXtFn;
+            console.log('成功加载 GetXsXt 函数');
+          } else {
+            // 清理script标签
+            document.head.removeChild(scriptElement);
+            throw new Error('GetXsXt function not found after loading modified xhsvm.js');
+          }
+        } catch (evalError) {
+          console.error('执行 xhsvm.js 失败:', evalError);
+          throw evalError;
+        }
+      } else {
+        throw new Error('Window object not available, cannot load xhsvm.js');
       }
-      this._getXsXtFn = fn as any;
     } catch (err) {
       console.error('加载 xhsvm.js 失败:', err);
       throw err;
@@ -149,7 +242,24 @@ class XhsApi {
       geo: '',
       image_formats: JSON.stringify(['jpg', 'webp', 'avif'])
     };
-    return this.request('/api/sns/web/v1/search/notes', { method: 'POST', data });
+    
+    const uri = '/api/sns/web/v1/search/notes';
+    
+    // 尝试添加签名（虽然Python版本不需要，但Tauri HTTP可能需要）
+    console.log('尝试为search_notes添加签名...');
+    try {
+      const xsxt = this.get_xs_xt(uri, data, this._cookie);
+      const headers: Record<string, string> = {
+        'x-s': xsxt['X-s'],
+        'x-t': String(xsxt['X-t'])
+      };
+      console.log('签名生成成功:', xsxt);
+      return this.request(uri, { method: 'POST', data, headers });
+    } catch (signError) {
+      console.warn('签名生成失败，尝试不使用签名:', signError);
+      // 如果签名失败，回退到不使用签名
+      return this.request(uri, { method: 'POST', data });
+    }
   }
 
   async home_feed(): Promise<any> {
@@ -227,9 +337,16 @@ class XhsApi {
 export class XiaohongshuAgent extends BaseAgent implements SpecializedToolAgent {
   override name = 'XiaohongshuTool';
   
-  description = 'Search and extract Xiaohongshu content (note text, images, videos, etc.)';
+  description = 'Search and extract Xiaohongshu (Little Red Book) content—including note text, images, videos, hashtags, user comments, and metadata—focusing on travel itineraries, product reviews, lifestyle tips, or how-to guides. Prioritize recent, high-engagement posts with practical, step-by-step advice.';
+  
+  // 配置：是否使用Python后端（推荐）
+  // true: 使用Python脚本（稳定，可靠）
+  // false: 使用TypeScript直接调用（可能因Tauri HTTP限制而失败）
+  private readonly USE_PYTHON_BACKEND = true;
   
   // 小红书Cookie配置（需要从有效登录会话获取）
+  // ⚠️ 重要：请确保Cookie是最新的！可以从浏览器的开发者工具中获取
+  // 获取方法：打开 xiaohongshu.com -> F12 -> Application -> Cookies -> 复制所有Cookie值
   private readonly XHS_COOKIE = 'abRequestId=c57fe682-d2fc-5f58-8ce2-0c8b42ff20a3; a1=1970fd420e08csfwx62vnn688m1bgvahhuhlacu7y50000302545; webId=44ab99e10509af6d75c0887343fb4d28; gid=yjW8if4qiWxSyjW8if4J87S7d8YSMiECKJhIxWvIKYY6y128Dkh0x0888q8J2428f4DSi0yd; webBuild=4.79.0; xsecappid=xhs-pc-web; web_session=0400698d369e974828e10de98a3a4b942f34d2; acw_tc=0a5085c517573997204463137e2d5ba030f87c7afb9b969b5ae532b84589e0; loadts=1757399891064; unread={%22ub%22:%2268ba6574000000001b01e410%22%2C%22ue%22:%2268ba9113000000001c0121db%22%2C%22uc%22:32}; websectiga=6169c1e84f393779a5f7de7303038f3b47a78e47be716e7bec57ccce17d45f99; sec_poison_id=5c09b5be-7b4c-46be-b75e-e61afd1eedc7';
   
   // XhsApi 实例
@@ -303,6 +420,30 @@ export class XiaohongshuAgent extends BaseAgent implements SpecializedToolAgent 
     taskRef.observer.next(progressMessage);
     
     try {
+      // 如果启用Python后端，直接调用Python脚本
+      if (this.USE_PYTHON_BACKEND) {
+        console.log('使用Python后端获取小红书数据...');
+        const result = await this.callPythonBackend(searchQuery, taskRef);
+        return result;
+      }
+      
+      // 否则使用TypeScript版本（可能失败）
+      console.log('使用TypeScript版本获取小红书数据...');
+      
+      // 先验证Cookie是否有效
+      console.log('验证Cookie有效性...');
+      try {
+        const meResponse = await this.xhsApi.get_me();
+        console.log('get_me响应:', JSON.stringify(meResponse, null, 2));
+        if (meResponse && meResponse.data) {
+          console.log('✓ Cookie有效，用户信息:', meResponse.data);
+        } else {
+          console.warn('⚠ Cookie可能无效或已过期');
+        }
+      } catch (error) {
+        console.error('✗ Cookie验证失败:', error);
+      }
+      
       // 先搜索笔记 - 使用简化搜索格式
       const searchResults = await this.performSimpleSearch(searchQuery, limit);
       
@@ -440,7 +581,27 @@ export class XiaohongshuAgent extends BaseAgent implements SpecializedToolAgent 
       // 使用XhsApi搜索笔记
       const searchResponse = await this.xhsApi.searchNotes(query, limit);
       
-      if (!searchResponse || !searchResponse.data || !searchResponse.data.items) {
+      // 添加调试日志
+      console.log('搜索API响应:', JSON.stringify(searchResponse, null, 2));
+      
+      // 检查响应结构
+      if (!searchResponse) {
+        console.error('搜索响应为空');
+        return [];
+      }
+      
+      if (!searchResponse.data) {
+        console.error('搜索响应缺少data字段:', searchResponse);
+        return [];
+      }
+      
+      if (!searchResponse.data.items) {
+        console.error('搜索响应data缺少items字段:', searchResponse.data);
+        return [];
+      }
+      
+      if (searchResponse.data.items.length === 0) {
+        console.warn('搜索响应items为空数组');
         return [];
       }
 
@@ -460,9 +621,12 @@ export class XiaohongshuAgent extends BaseAgent implements SpecializedToolAgent 
             url: url,
             note_id: item.id
           });
+          
+          console.log(`找到笔记: ${noteCard.display_title}`);
         }
       }
-
+      
+      console.log(`共找到 ${resList.length} 条笔记`);
       return resList;
 
     } catch (error) {
@@ -635,5 +799,63 @@ export class XiaohongshuAgent extends BaseAgent implements SpecializedToolAgent 
   // 延迟函数
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+  
+  /**
+   * 调用Python后端获取小红书数据
+   * @param keywords 搜索关键词
+   * @param taskRef Agent任务引用
+   * @returns JSON字符串格式的搜索结果
+   */
+  private async callPythonBackend(keywords: string, taskRef: AgentTaskRef): Promise<string> {
+    try {
+      // 构建Python脚本的路径
+      // 在Tauri开发模式下，工作目录通常在src-tauri，需要返回上一级
+      const scriptPath = '../src/apps/toolkits/XHS-toolkit/searchXHS.py';
+      
+      const progressMsg = await taskRef.createMessage('🐍 正在调用Python后端...');
+      taskRef.observer.next(progressMsg);
+      
+      console.log('执行Python命令:', `python ${scriptPath} --action details --keywords "${keywords}"`);
+      
+      // 创建Python命令
+      const command = Command.create('python', [
+        scriptPath,
+        '--action', 'details',
+        '--keywords', keywords
+      ]);
+      
+      // 执行命令并获取输出
+      const output = await command.execute();
+      
+      console.log('Python脚本退出码:', output.code);
+      console.log('Python脚本stdout:', output.stdout.substring(0, 500));
+      console.log('Python脚本stderr:', output.stderr.substring(0, 500));
+      
+      if (output.code !== 0) {
+        throw new Error(`Python脚本执行失败 (退出码: ${output.code})\n错误: ${output.stderr}`);
+      }
+      
+      // 解析Python输出的JSON
+      let result;
+      try {
+        result = JSON.parse(output.stdout);
+      } catch (parseError) {
+        console.error('解析Python输出失败:', parseError);
+        console.error('原始输出:', output.stdout);
+        throw new Error('解析Python脚本输出失败: ' + (parseError instanceof Error ? parseError.message : String(parseError)));
+      }
+      
+      progressMsg.content = '✅ Python后端调用成功';
+      taskRef.completeMessage(progressMsg);
+      taskRef.observer.next(progressMsg);
+      
+      // 返回JSON字符串
+      return JSON.stringify(result, null, 2);
+      
+    } catch (error) {
+      console.error('Python后端调用失败:', error);
+      throw new Error(`Python后端调用失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }

@@ -8,7 +8,7 @@ import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 export class HtmlReportAgent extends BaseAgent implements SpecializedToolAgent {
   override name = 'HtmlReportTool';
 
-  description = 'Generate beautiful HTML reports that summarize conversation content and task execution results with modern UI design and responsive layout';
+  description = 'Generate beautiful HTML reports that summarize conversation content and task execution results with modern UI design and responsive layout. ONLY use this tool when the user explicitly requests to generate a report, export conversation data, or create a summary document. Do not use this tool for regular conversation responses.';
 
   parameters = {
     type: 'object',

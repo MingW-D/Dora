@@ -51,6 +51,7 @@ export type AgentTaskRef = {
   abortSignal: AbortSignal;
   studio: Studio;
   observer: ReplaySubject<MessageStream>;
+  subtaskId?: number;  // 添加 subtaskId 字段
   createTaskMessage: (
     task: Pick<Task, 'type' | 'description' | 'payload'>,
   ) => Promise<MessageStream>;

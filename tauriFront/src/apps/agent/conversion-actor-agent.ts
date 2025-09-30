@@ -77,20 +77,22 @@ export class ConversionActorAgent {
     return this.studio;
   }
 
-  async start(taskOrOptions?: string | { task: string; uiMessageId?: string }) {
+  async start(taskOrOptions?: string | { task: string; uiMessageId?: string; subtaskId?: number }) {
     await this.validateInitialization();
 
-    // 解析参数：既兼容旧的字符串，也支持对象携带 uiMessageId
+    // 解析参数：既兼容旧的字符串，也支持对象携带 uiMessageId 和 subtaskId
     const taskOverride =
       typeof taskOrOptions === 'string' ? taskOrOptions : taskOrOptions?.task;
     const uiMessageId =
       typeof taskOrOptions === 'object' ? taskOrOptions?.uiMessageId : undefined;
+    const subtaskId =
+      typeof taskOrOptions === 'object' ? taskOrOptions?.subtaskId : undefined;
 
       console.log('taskOverride', taskOverride);
     // 优先使用显式传入的任务（来自前端用户输入）
     if (taskOverride && taskOverride.trim()) {
       this.resetObserver();
-      const agentTaskRef = this.createAgentTaskRef(uiMessageId);
+      const agentTaskRef = this.createAgentTaskRef(uiMessageId, subtaskId);
       this.coordinateRolePlay
         .play(taskOverride, agentTaskRef)
         .then(() => this.observer.complete())
@@ -98,7 +100,7 @@ export class ConversionActorAgent {
       return this.observer.asObservable();
     }
 
-    // 否则回退到读取“空闲消息”
+    // 否则回退到读取"空闲消息"
     const message = await this.messageHandler.getIdleMessage();
     if (!message || message.status !== 'IDLE') {
       return this.observer.asObservable();
@@ -108,7 +110,7 @@ export class ConversionActorAgent {
 
     this.resetObserver();
 
-    const agentTaskRef = this.createAgentTaskRef();
+    const agentTaskRef = this.createAgentTaskRef(undefined, subtaskId);
     const task = message.content;
 
     this.coordinateRolePlay
@@ -127,40 +129,59 @@ export class ConversionActorAgent {
     this.observer = new ReplaySubject<MessageStream>();
   }
 
-  private createAgentTaskRef(uiMessageId?: string): AgentTaskRef {
+  private createAgentTaskRef(uiMessageId?: string, subtaskId?: number): AgentTaskRef {
     if (!this.studio) {
       throw new Error('Studio not initialized');
     }
-    return {
+    
+    // 创建 taskRef 对象，稍后会填充方法
+    const taskRef: AgentTaskRef = {
       conversationId: this.conversationId,
       uiMessageId,
       abortSignal: this.abortSignal,
       observer: this.observer,
-      createTaskMessage: async (task) => {
-        const taskModel = await this.messageHandler.createTask(task);
-        // 添加任务类型的内容块到共享消息
-        return await this.messageHandler.addContentBlock('task', {
-          taskId: taskModel.id,
-          type: task.type,
-          description: task.description,
-          payload: task.payload
-        }, 'Task Manager');
-      },
-      completeTaskMessage: async (task) => {
-        await this.messageHandler.completeTask(task);
-      },
-      createMessage: (roleName: string, taskId?: string) =>
-        this.messageHandler.addContentBlock('text', '', roleName),
-      completeMessage: async (message, status = 'COMPLETED' as MessageStatus) => {
-        // 更新当前内容块
-        if (message.content) {
-          await this.messageHandler.updateContentBlock(message.id, message.content);
-        }
-        // 当所有agent完成时才真正完成共享消息
-        return this.messageHandler.completeMessage(message, status);
-      },
+      subtaskId,
+      createTaskMessage: undefined as any,
+      completeTaskMessage: undefined as any,
+      createMessage: undefined as any,
+      completeMessage: undefined as any,
       studio: this.studio,
     };
+
+    // 现在定义方法，这样它们可以访问到 taskRef 对象
+    taskRef.createTaskMessage = async (task) => {
+      const taskModel = await this.messageHandler.createTask(task);
+      // 添加任务类型的内容块到共享消息
+      const message = await this.messageHandler.addContentBlock('task', {
+        taskId: taskModel.id,
+        type: task.type,
+        description: task.description,
+        payload: task.payload
+      }, 'Task Manager');
+      
+      return message;
+    };
+
+    taskRef.completeTaskMessage = async (task) => {
+      await this.messageHandler.completeTask(task);
+    };
+
+    taskRef.createMessage = async (roleName: string, taskId?: string) => {
+      const message = await this.messageHandler.addContentBlock('text', '', roleName);
+      
+      return message;
+    };
+
+    taskRef.completeMessage = async (message, status = 'COMPLETED' as MessageStatus) => {
+      // 更新当前内容块
+      if (message.content) {
+        await this.messageHandler.updateContentBlock(message.id, message.content);
+      }
+      // 当所有agent完成时才真正完成共享消息
+      return this.messageHandler.completeMessage(message, status);
+    };
+
+    return taskRef;
   }
 
   private async validateInitialization() {

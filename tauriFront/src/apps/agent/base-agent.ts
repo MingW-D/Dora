@@ -316,14 +316,23 @@ export class BaseAgent {
 
         // 发送工具调用开始的消息
         const toolMessage = await taskRef.createMessage('Tool Agent');
-        toolMessage.content = JSON.stringify({
+        
+        // 创建消息内容，直接包含 subtaskId
+        const messageContent: any = {
           type: 'tool_call',
           toolName: toolName,
           agentId: this.uuid,
           status: 'started',
           parameters: parsedArgs,
           timestamp: Date.now()
-        });
+        };
+        
+        // 直接添加 subtaskId 到消息内容中
+        if (taskRef.subtaskId !== undefined) {
+          messageContent.subtaskId = taskRef.subtaskId;
+        }
+        
+        toolMessage.content = JSON.stringify(messageContent);
         taskRef.observer.next(toolMessage);
 
         taskRef.studio.browserUse.webContentsView.setVisible(false);
@@ -347,7 +356,9 @@ export class BaseAgent {
           
           // 发送工具调用完成的消息 - 使用内容块聚合
           const completedMessage = await taskRef.createMessage('Tool Agent');
-          completedMessage.content = JSON.stringify({
+          
+          // 创建消息内容，直接包含 subtaskId
+          const completedContent: any = {
             type: 'tool_message',
             toolName: toolName,
             agentId: this.uuid,
@@ -355,7 +366,14 @@ export class BaseAgent {
             parameters: parsedArgs,
             result: result,
             timestamp: Date.now()
-          });
+          };
+          
+          // 直接添加 subtaskId 到消息内容中
+          if (taskRef.subtaskId !== undefined) {
+            completedContent.subtaskId = taskRef.subtaskId;
+          }
+          
+          completedMessage.content = JSON.stringify(completedContent);
           taskRef.observer.next(completedMessage);
         } else {
           this.addToHistory(
@@ -380,7 +398,9 @@ export class BaseAgent {
         
         // 发送工具调用失败的消息
         const failedMessage = await taskRef.createMessage('Tool Agent');
-        failedMessage.content = JSON.stringify({
+        
+        // 创建消息内容，直接包含 subtaskId
+        const failedContent: any = {
           type: 'tool_message',
           toolName: toolName,
           agentId: this.uuid,
@@ -388,7 +408,14 @@ export class BaseAgent {
           parameters: {},
           error: errorMessage,
           timestamp: Date.now()
-        });
+        };
+        
+        // 直接添加 subtaskId 到消息内容中
+        if (taskRef.subtaskId !== undefined) {
+          failedContent.subtaskId = taskRef.subtaskId;
+        }
+        
+        failedMessage.content = JSON.stringify(failedContent);
         taskRef.observer.next(failedMessage);
       }
     }

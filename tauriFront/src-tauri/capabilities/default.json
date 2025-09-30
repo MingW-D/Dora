@@ -39,6 +39,18 @@
         "$APPDATA",
         "$APPDATA/*"
       ]
-    }  
+    },
+    "shell:allow-execute",
+    "shell:allow-spawn",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "python",
+          "cmd": "python",
+          "args": true
+        }
+      ]
+    }
   ]
 }

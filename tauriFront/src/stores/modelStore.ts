@@ -9,7 +9,7 @@ export interface ModelConfig {
   model_name: string;
   api_url: string;
   api_key?: string;
-  provider: 'openai' | 'ollama';
+  provider: 'openai' | 'ollama' | 'modelscope';
   supports_tools?: boolean; // 可选字段，用于手动指定是否支持工具
   description: string;
   prompt_template: string;

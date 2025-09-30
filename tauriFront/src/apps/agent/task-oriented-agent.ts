@@ -2,6 +2,7 @@ import { lastValueFrom, defaultIfEmpty } from 'rxjs';
 import {
   executorAgentSystemPrompt,
   plannerAgentSystemPrompt,
+  summaryAgentSystemPrompt,
   validatorAgentSystemPrompt,
 } from '../prompt/index.js';
 import type { SpecializedToolAgent } from '../toolkits/types.js';
@@ -53,6 +54,10 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
     temperature: 0.1,
   });
 
+  private summaryAgent = new BaseAgent({
+    temperature: 0.3,
+  });
+
   static readonly MAX_ITERATIONS = 10;
   static readonly MAX_SUBTASKS = 7;
 
@@ -73,6 +78,7 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
     );
 
     this.validatorAgent.initialSystemMessage(validatorAgentSystemPrompt());
+    this.summaryAgent.initialSystemMessage(summaryAgentSystemPrompt());
 
     if (taskRef.abortSignal.aborted) {
       return 'Task has been aborted.';
@@ -95,6 +101,10 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
         return 'Task has been aborted.';
       }
 
+      // 重要：动态更新 taskRef.subtaskId 为当前子任务的 ID
+      // 这样在执行子任务期间创建的所有消息都会使用正确的 subtaskId
+      taskRef.subtaskId = subTask.id;
+
       // 发送子任务开始消息 - 使用内容块聚合
       const startMessage = await taskRef.createMessage('Task Manager');
       startMessage.content = JSON.stringify({
@@ -105,6 +115,7 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
         completedSubtasks: subTasks.filter(t => t.completed).length,
         totalSubtasks: subTasks.length
       });
+      
       taskRef.observer.next(startMessage);
 
       let retryCount = 0;
@@ -135,6 +146,7 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
           totalSubtasks: subTasks.length,
           validationResult: true
         });
+        
         taskRef.observer.next(completeMessage);
           break;
         }
@@ -153,6 +165,7 @@ export class TaskOrientedAgent extends BaseAgent implements SpecializedToolAgent
           totalSubtasks: subTasks.length,
           validationResult: false
         });
+        
         taskRef.observer.next(failMessage);
       }
     }
@@ -557,7 +570,7 @@ If all requirements are fully met, output "VALIDATED: true", otherwise output "V
         '\nNote: Not all subtasks were successfully completed. Please mention this in your summary and explain the potential impact.';
     }
 
-    const completion = await this.plannerAgent.run(prompt, taskRef);
+    const completion = await this.summaryAgent.run(prompt, taskRef);
     if (!completion) {
       console.error('Unable to generate final summary.');
       return 'Unable to generate final summary.';

@@ -169,7 +169,11 @@ async function saveApiKey() {
                     {{ model.name }}
                     <span v-if="model.is_default" class="default-badge">默认</span>
                     <span class="provider-badge" :class="model.provider || 'openai'">
-                      {{ (model.provider || 'openai') === 'ollama' ? 'Ollama' : 'OpenAI' }}
+                      {{ 
+                        (model.provider || 'openai') === 'ollama' ? 'Ollama' : 
+                        (model.provider || 'openai') === 'modelscope' ? 'ModelScope' : 
+                        'OpenAI' 
+                      }}
                     </span>
                   </div>
                   <div class="model-id">{{ model.model_name }}</div>
@@ -432,6 +436,11 @@ async function saveApiKey() {
 .provider-badge.ollama {
   background-color: rgba(59, 130, 246, 0.1);
   color: #3b82f6;
+}
+
+.provider-badge.modelscope {
+  background-color: rgba(255, 193, 7, 0.1);
+  color: #ffc107;
 }
 
 .model-id {

@@ -188,8 +188,39 @@ async def get_all_notes_details(keywords: str) -> str:
 
 
 if __name__ == "__main__":
-    # result = asyncio.run(search_notes('大疆'))
-    # print(result)
-    result_all_details = asyncio.run(get_all_notes_details('大疆'))
-    print(result_all_details)
+    import sys
+    import io
+    
+    # 设置标准输出和错误输出为UTF-8编码（解决Windows下GBK编码问题）
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='小红书内容搜索工具')
+    parser.add_argument('--action', type=str, required=True, choices=['search', 'details'], 
+                        help='操作类型：search-搜索笔记，details-获取详情')
+    parser.add_argument('--keywords', type=str, required=True, help='搜索关键词')
+    parser.add_argument('--limit', type=int, default=10, help='搜索结果数量限制')
+    
+    args = parser.parse_args()
+    
+    try:
+        if args.action == 'search':
+            # 仅搜索笔记
+            result = asyncio.run(search_notes(args.keywords))
+            print(json.dumps(result, ensure_ascii=False))
+        elif args.action == 'details':
+            # 搜索并获取详情
+            result = asyncio.run(get_all_notes_details(args.keywords))
+            print(result)  # get_all_notes_details已经返回JSON字符串
+        
+        sys.exit(0)  # 成功退出
+    except Exception as e:
+        # 输出错误信息到stderr
+        error_result = {
+            'success': False,
+            'error': str(e)
+        }
+        print(json.dumps(error_result, ensure_ascii=False), file=sys.stderr)
+        sys.exit(1)  # 错误退出
 
